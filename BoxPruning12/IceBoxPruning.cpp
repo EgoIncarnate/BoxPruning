@@ -360,54 +360,54 @@ ExitLoop:;
 			align		16							// Align start of loop on 16-byte boundary for perf
 FastLoop:
 			comiss		xmm1, xmmword ptr [esi+ecx+32]	// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
-         jb          CarefulLoop // nope!
+            jb          CarefulLoop // nope!
 
-         // Unroll 0
-         movups      xmm3, xmmword ptr [edx+ecx*2+0]  // Box1YZ
-         cmpnleps    xmm3, xmm2
-         movmskps    eax, xmm3
-         cmp         eax, 0Ch
-         je          FoundSlot0
+            // Unroll 0
+            movups      xmm3, xmmword ptr [edx+ecx*2+0]  // Box1YZ
+            cmpnleps    xmm3, xmm2
+            movmskps    eax, xmm3
+            cmp         eax, 0Ch
+            je          FoundSlot0
 
-         // Unroll 1
-         movups      xmm3, xmmword ptr [edx+ecx*2+16] // Box1YZ
-         cmpnleps    xmm3, xmm2
-         movmskps    eax, xmm3
-         cmp         eax, 0Ch
-         je          FoundSlot1
+            // Unroll 1
+            movups      xmm3, xmmword ptr [edx+ecx*2+16] // Box1YZ
+            cmpnleps    xmm3, xmm2
+            movmskps    eax, xmm3
+            cmp         eax, 0Ch
+            je          FoundSlot1
 
-         // Unroll 2
-         movups      xmm3, xmmword ptr [edx+ecx*2+32]  // Box1YZ
-         cmpnleps    xmm3, xmm2
-         movmskps    eax, xmm3
-         cmp         eax, 0Ch
-         je          FoundSlot2
+            // Unroll 2
+            movups      xmm3, xmmword ptr [edx+ecx*2+32]  // Box1YZ
+            cmpnleps    xmm3, xmm2
+            movmskps    eax, xmm3
+            cmp         eax, 0Ch
+            je          FoundSlot2
 
-         // Unroll 3
-         movups      xmm3, xmmword ptr [edx+ecx*2+48]  // Box1YZ
-         add         ecx, 32                           // Advance
-         cmpnleps    xmm3, xmm2
-         movmskps    eax, xmm3
-         cmp         eax, 0Ch
-         jne         FastLoop
+            // Unroll 3
+            movups      xmm3, xmmword ptr [edx+ecx*2+48]  // Box1YZ
+            add         ecx, 32                           // Advance
+            cmpnleps    xmm3, xmm2
+            movmskps    eax, xmm3
+            cmp         eax, 0Ch
+            jne         FastLoop
 
-         jmp         FastFoundOne
-         // slots 2-0 fall through for increment (I'm being lazy...)
+            jmp         FastFoundOne
+            // slots 2-0 fall through for increment (I'm being lazy...)
 FoundSlot2:
-         add         ecx, 8
+            add         ecx, 8
 FoundSlot1:
-         add         ecx, 8
+            add         ecx, 8
 FoundSlot0:
-         add         ecx, 8
+            add         ecx, 8
 FastFoundOne:
 			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
 			push        eax
-         push        ecx
-         push        edx
+            push        ecx
+            push        edx
 
 				// Recompute Index1
-            lea         ecx, [ecx+esi-8]
+                lea         ecx, [ecx+esi-8]
 				sub			ecx, BoxListX
 				shr			ecx, 3
 
@@ -419,22 +419,22 @@ FastFoundOne:
 				add         esp, 16
 
 			pop         edx
-         pop         ecx
-         pop         eax
+            pop         ecx
+            pop         eax
 			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
-         jmp         FastLoop
+            jmp         FastLoop
 
 
 CarefulLoop:
-         comiss      xmm1, xmmword ptr [esi+ecx]      // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-         jb          ExitLoop
+            comiss      xmm1, xmmword ptr [esi+ecx]      // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
+            jb          ExitLoop
 
 			// ~11600 with this:
 			movups		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
-         add         ecx, 8
-			cmpnleps	   xmm3, xmm2
-			movmskps	   eax, xmm3
+            add         ecx, 8
+			cmpnleps    xmm3, xmm2
+			movmskps    eax, xmm3
 			cmp			eax, 0Ch
 			jne         CarefulLoop
 
@@ -442,11 +442,11 @@ CarefulLoop:
 			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
 			push        eax
-         push        ecx
-         push        edx
+            push        ecx
+            push        edx
 
 				// Recompute Index1
-            lea         ecx, [ecx+esi-8]
+                lea         ecx, [ecx+esi-8]
 				sub			ecx, BoxListX
 				shr			ecx, 3
 
@@ -458,11 +458,11 @@ CarefulLoop:
 				add         esp, 16
 
 			pop         edx
-         pop         ecx
-         pop         eax
+            pop         ecx
+            pop         eax
 			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
-         jmp         CarefulLoop
+            jmp         CarefulLoop
 
 ExitLoop:;
 		}
