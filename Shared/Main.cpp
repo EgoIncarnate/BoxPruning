@@ -95,7 +95,8 @@ static void RunPerformanceTest()
 //	Pairs.SetSize(25000*2);
 //	Pairs.Reset();
 #endif
-	const udword NB = 16;
+	const udword NBbrute = 1;
+	const udword NB = 512;
 
 	// Test "complete" pruning
 	if(1)
@@ -106,7 +107,7 @@ static void RunPerformanceTest()
 		if(1)
 		{
 			// Brute-force
-			for(udword i=0;i<NB;i++)
+			for(udword i=0;i<NBbrute;i++)
 			{
 #ifdef USE_STL
 				Pairs.clear();
@@ -534,7 +535,7 @@ int main(int argc, char* argv[])
 //	RunValidityTest();
 //	RunEdgeCase();
 
-	while(!_kbhit());
+	//while(!_kbhit());
 
 	return 0;
 }
