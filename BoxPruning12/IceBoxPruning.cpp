@@ -225,7 +225,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	if(!nb || !list)
 		return false;
 
-	SIMD_AABB_X* BoxListX = new SIMD_AABB_X[nb+4];
+	SIMD_AABB_X* BoxListX = new SIMD_AABB_X[nb+5];
 	SIMD_AABB_YZ* BoxListYZ = (SIMD_AABB_YZ*)_aligned_malloc(sizeof(SIMD_AABB_YZ)*(nb+1), 16);
 
 	udword* Remap;
@@ -252,6 +252,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 		BoxListX[nb+1].mMinX = FLT_MAX;
 		BoxListX[nb+2].mMinX = FLT_MAX;
 		BoxListX[nb+3].mMinX = FLT_MAX;
+		BoxListX[nb+4].mMinX = FLT_MAX;
 		DELETEARRAY(PosList);
 //	}
 
@@ -353,28 +354,27 @@ ExitLoop:;
 
 			mov			eax, BoxListX				// eax = BoxListX
 			lea			esi, dword ptr [eax+edi*8]	// esi = BoxListX + Index1*8 = &BoxListX[Index1] (*8 because sizeof(SIMD_AABB_X)==8)
-			comiss		xmm1, xmmword ptr [esi]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-			jb			ExitLoop
 
 			xor			ecx, ecx
 
 			align		16							// Align start of loop on 16-byte boundary for perf
+//FastLoop:
+//			comiss		xmm1, xmmword ptr [esi+ecx+32]	// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
+//       jb          CarefulLoop // nope!
+
 CarefulLoop:
+         comiss      xmm1, xmmword ptr [esi+ecx]      // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
+         jb          ExitLoop
+
 			// ~11600 with this:
-			movaps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
+			movups		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
+         add         ecx, 8
 			cmpnleps	   xmm3, xmm2
 			movmskps	   eax, xmm3
 			cmp			eax, 0Ch
-			je          CarefulFoundOne
+			jne         CarefulLoop
 
-CarefulNoOverlap:;
-			add			ecx, 8
-			comiss		xmm1, xmmword ptr [esi+ecx]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-			jae			CarefulLoop
-         jmp         ExitLoop
-
-			align		16
-CarefulFoundOne:;
+         // found one!
 			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
 			push        eax
@@ -382,7 +382,7 @@ CarefulFoundOne:;
          push        edx
 
 				// Recompute Index1
-				add			ecx, esi
+            lea         ecx, [ecx+esi-8]
 				sub			ecx, BoxListX
 				shr			ecx, 3
 
@@ -398,7 +398,7 @@ CarefulFoundOne:;
          pop         eax
 			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
-         jmp         CarefulNoOverlap
+         jmp         CarefulLoop
 
 ExitLoop:;
 		}
