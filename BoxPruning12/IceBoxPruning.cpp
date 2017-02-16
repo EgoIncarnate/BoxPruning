@@ -266,6 +266,12 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 		const float MinLimit = Box0X.mMinX;
 		while(BoxListX[RunningAddress++].mMinX<MinLimit);
 
+        if(BoxListX[RunningAddress].mMinX > Box0X.mMaxX)
+        {
+            Index0++;
+            continue;
+        }
+
 //#define NAIVE_VERSION
 #ifdef NAIVE_VERSION
 		const float MaxLimit = Box0X.mMaxX;
@@ -339,12 +345,13 @@ ExitLoop:;
 		_asm
 		{
 			movss		xmm1, MaxLimit				// xmm1 = MaxLimit
-			mov			edx, BoxListYZ				// edx = BoxListYZ
 
+            mov			edx, BoxListYZ				// edx = BoxListYZ
 			mov			edi, Index0					// edi = Index0
 			add			edi, edi					// edi = Index0 * 2
 			lea			esi, dword ptr [edx+edi*8]	// esi = BoxListYZ + Index0*16 = &BoxListYZ[Index0] (*16 because sizeof(SIMD_AABB_YZ)==16)
-			movaps		xmm2, xmmword ptr [esi]		// xmm2 = BoxListYZ[Index0] = Box0YZ <= that's the _mm_load_ps in SIMD_OVERLAP_INIT
+
+            movaps		xmm2, xmmword ptr [esi]		// xmm2 = BoxListYZ[Index0] = Box0YZ <= that's the _mm_load_ps in SIMD_OVERLAP_INIT
 			shufps		xmm2, xmm2, 4Eh				// that's our _mm_shuffle_ps in SIMD_OVERLAP_INIT
 
 			mov			edi, RunningAddress			// edi = Index1
@@ -359,32 +366,32 @@ ExitLoop:;
 
 			align		16							// Align start of loop on 16-byte boundary for perf
 FastLoop:
-			comiss		xmm1, xmmword ptr [esi+ecx+32]	// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
+			comiss		xmm1, xmmword ptr [esi+ecx+24]	// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
             jb          CarefulLoop // nope!
 
             // Unroll 0
-            movups      xmm3, xmmword ptr [edx+ecx*2+0]  // Box1YZ
+            movaps      xmm3, xmmword ptr [edx+ecx*2+0]  // Box1YZ
             cmpnleps    xmm3, xmm2
             movmskps    eax, xmm3
             cmp         eax, 0Ch
             je          FoundSlot0
 
             // Unroll 1
-            movups      xmm3, xmmword ptr [edx+ecx*2+16] // Box1YZ
+            movaps      xmm3, xmmword ptr [edx+ecx*2+16] // Box1YZ
             cmpnleps    xmm3, xmm2
             movmskps    eax, xmm3
             cmp         eax, 0Ch
             je          FoundSlot1
 
             // Unroll 2
-            movups      xmm3, xmmword ptr [edx+ecx*2+32]  // Box1YZ
+            movaps      xmm3, xmmword ptr [edx+ecx*2+32]  // Box1YZ
             cmpnleps    xmm3, xmm2
             movmskps    eax, xmm3
             cmp         eax, 0Ch
             je          FoundSlot2
 
             // Unroll 3
-            movups      xmm3, xmmword ptr [edx+ecx*2+48]  // Box1YZ
+            movaps      xmm3, xmmword ptr [edx+ecx*2+48]  // Box1YZ
             add         ecx, 32                           // Advance
             cmpnleps    xmm3, xmm2
             movmskps    eax, xmm3
@@ -431,7 +438,7 @@ CarefulLoop:
             jb          ExitLoop
 
 			// ~11600 with this:
-			movups		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
+			movaps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
             add         ecx, 8
 			cmpnleps    xmm3, xmm2
 			movmskps    eax, xmm3
