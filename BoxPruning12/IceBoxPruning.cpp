@@ -133,6 +133,30 @@ bool Meshmerizer::BipartiteBoxPruning(udword nb0, const AABB* list0, udword nb1,
 }
 
 
+// Munge the float bits to return produce an unsigned order-preserving
+// ranking of floating-point numbers.
+// (Old trick: http://stereopsis.com/radix.html FloatFlip, with a new
+// spin to get rid of -0.0f)
+
+// In /fp:precise, we can just calc "x + 0.0f" and get what we need.
+// But fast math optimizes it away. Could use #pragma float_control,
+// but that prohibits inlining of MungeFloat. So do this silly thing
+// instead.
+float g_global_this_always_zero = 0.0f;
+
+static inline udword MungeFloat(float f)
+{
+    union
+    {
+        float f;
+        udword u;
+        sdword s;
+    } u;
+    u.f = f + g_global_this_always_zero;  // NOT a nop! Canonicalizes -0.0f to +0.0f
+    udword toggle = (u.s >> 31) | (1u << 31);
+    return u.u ^ toggle;
+}
+//#pragma float_control(pop)
 
 struct SIMD_AABB_X
 {
@@ -141,12 +165,12 @@ struct SIMD_AABB_X
 
 	void	InitFrom(const AABB& b)
 	{
-		mMinX	= b.mMin.x;
-		mMaxX	= b.mMax.x;
+		mMinX	= MungeFloat(b.mMin.x);
+		mMaxX	= MungeFloat(b.mMax.x);
 	}
 
-    float mMinX;
-    float mMaxX;
+    udword mMinX;
+    udword mMaxX;
 };
 
 struct SIMD_AABB_YZ
@@ -248,11 +272,11 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 			BoxListX[i].InitFrom(list[SortedIndex]);
 			BoxListYZ[i].InitFrom(list[SortedIndex]);
 		}
-		BoxListX[nb+0].mMinX = FLT_MAX;
-		BoxListX[nb+1].mMinX = FLT_MAX;
-		BoxListX[nb+2].mMinX = FLT_MAX;
-		BoxListX[nb+3].mMinX = FLT_MAX;
-		BoxListX[nb+4].mMinX = FLT_MAX;
+		BoxListX[nb+0].mMinX = ~0u;
+		BoxListX[nb+1].mMinX = ~0u;
+		BoxListX[nb+2].mMinX = ~0u;
+		BoxListX[nb+3].mMinX = ~0u;
+		BoxListX[nb+4].mMinX = ~0u;
 		DELETEARRAY(PosList);
 //	}
 
@@ -263,7 +287,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	{
 		const SIMD_AABB_X& Box0X = BoxListX[Index0];
 
-		const float MinLimit = Box0X.mMinX;
+		const udword MinLimit = Box0X.mMinX;
 		while(BoxListX[RunningAddress++].mMinX<MinLimit);
 
         if(BoxListX[RunningAddress].mMinX > Box0X.mMaxX)
@@ -272,71 +296,9 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
             continue;
         }
 
-//#define NAIVE_VERSION
-#ifdef NAIVE_VERSION
-		const float MaxLimit = Box0X.mMaxX;
-		const udword RIndex0 = Remap[Index0];
-
-		__m128	SavedXMM1;
-		__m128	SavedXMM2;
-
-		_asm
-		{
-			movss		xmm1, MaxLimit				// xmm1 = MaxLimit
-			mov			edx, BoxListYZ				// edx = BoxListYZ
-
-			mov			edi, Index0					// edi = Index0
-			add			edi, edi					// edi = Index0 * 2
-			lea			esi, dword ptr [edx+edi*8]	// esi = BoxListYZ + Index0*16 = &BoxListYZ[Index0] (*16 because sizeof(SIMD_AABB_YZ)==16)
-			movaps		xmm2, xmmword ptr [esi]		// xmm2 = BoxListYZ[Index0] = Box0YZ <= that's the _mm_load_ps in SIMD_OVERLAP_INIT
-			shufps		xmm2, xmm2, 4Eh				// that's our _mm_shuffle_ps in SIMD_OVERLAP_INIT
-
-			mov			edi, RunningAddress			// edi = Index1
-			mov			eax, edi					// eax = Index1
-			shl			eax, 4						// eax = Index1 * 16
-			add			edx, eax					// edx = &BoxListYZ[Index1]
-
-			mov			eax, BoxListX				// eax = BoxListX
-			lea			esi, dword ptr [eax+edi*8]	// esi = BoxListX + Index1*8 = &BoxListX[Index1] (*8 because sizeof(SIMD_AABB_X)==8)
-			comiss		xmm1, xmmword ptr [esi]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-			jb			ExitLoop
-
-			align		16							// Align start of loop on 16-byte boundary for perf
-EnterLoop:
-			movaps		xmm3, xmm2					// xmm2 = pre-shuffled box, constant for the duration of the loop
-			cmpltps		xmm3, xmmword ptr [edx]		// that's _mm_cmpgt_ps in SIMD_OVERLAP_TEST
-			movmskps	eax, xmm3					// that's _mm_movemask_ps in SIMD_OVERLAP_TEST
-
-			cmp			eax, 0Ch
-			jne			NoOverlap
-
-			movaps		SavedXMM1, xmm1
-			movaps		SavedXMM2, xmm2
-			pushad
-				push		Remap
-				push		pairs
-				push		edi
-				push		RIndex0
-				call		outputPair2;
-				add         esp, 16
-			popad
-			movaps		xmm1, SavedXMM1
-			movaps		xmm2, SavedXMM2
-
-			align		16
-NoOverlap:;
-			inc			edi							// Index1++
-			add			esi, 8
-			add			edx, 16
-			comiss		xmm1, xmmword ptr [esi]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-			jae			EnterLoop
-ExitLoop:;
-		}
-#endif
-
 #define VERSION4
 #ifdef VERSION4
-		const float MaxLimit = Box0X.mMaxX;
+		const udword MaxLimit = Box0X.mMaxX;
 		const udword RIndex0 = Remap[Index0];
 
 		__m128	SavedXMM1;
@@ -344,8 +306,6 @@ ExitLoop:;
 
 		_asm
 		{
-			movss		xmm1, MaxLimit				// xmm1 = MaxLimit
-
             mov			edx, BoxListYZ				// edx = BoxListYZ
 			mov			edi, Index0					// edi = Index0
 			add			edi, edi					// edi = Index0 * 2
@@ -362,11 +322,12 @@ ExitLoop:;
 			mov			eax, BoxListX				// eax = BoxListX
 			lea			esi, dword ptr [eax+edi*8]	// esi = BoxListX + Index1*8 = &BoxListX[Index1] (*8 because sizeof(SIMD_AABB_X)==8)
 
+            mov         edi, MaxLimit               // edi = MaxLimit
 			xor			ecx, ecx
 
 			align		16							// Align start of loop on 16-byte boundary for perf
 FastLoop:
-			comiss		xmm1, xmmword ptr [esi+ecx+24]	// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
+            cmp         edi, [esi+ecx+24]           // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
             jb          CarefulLoop // nope!
 
             // Unroll 0
@@ -434,7 +395,7 @@ FastFoundOne:
 
 
 CarefulLoop:
-            comiss      xmm1, xmmword ptr [esi+ecx]      // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
+            cmp         edi, [esi+ecx]                   // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
             jb          ExitLoop
 
 			// ~11600 with this:
