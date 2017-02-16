@@ -225,7 +225,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	if(!nb || !list)
 		return false;
 
-	SIMD_AABB_X* BoxListX = new SIMD_AABB_X[nb+1];
+	SIMD_AABB_X* BoxListX = new SIMD_AABB_X[nb+4];
 	SIMD_AABB_YZ* BoxListYZ = (SIMD_AABB_YZ*)_aligned_malloc(sizeof(SIMD_AABB_YZ)*(nb+1), 16);
 
 	udword* Remap;
@@ -248,7 +248,10 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 			BoxListX[i].InitFrom(list[SortedIndex]);
 			BoxListYZ[i].InitFrom(list[SortedIndex]);
 		}
-		BoxListX[nb].mMinX = FLT_MAX;
+		BoxListX[nb+0].mMinX = FLT_MAX;
+		BoxListX[nb+1].mMinX = FLT_MAX;
+		BoxListX[nb+2].mMinX = FLT_MAX;
+		BoxListX[nb+3].mMinX = FLT_MAX;
 		DELETEARRAY(PosList);
 //	}
 
@@ -359,23 +362,25 @@ ExitLoop:;
 EnterLoop:
 			// ~11600 with this:
 			movaps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
-			cmpnltps	xmm3, xmm2
-
-			// ~11900 with this:
-//			movaps		xmm3, xmm2
-//			cmpltps		xmm3, xmmword ptr [edx+ecx*2]
-
-//			movaps		xmm3, xmm2
-//			subps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
-
-			movmskps	eax, xmm3
-
+			cmpnleps	   xmm3, xmm2
+			movmskps	   eax, xmm3
 			cmp			eax, 0Ch
-			jne			NoOverlap
+			je          FoundOne
 
+NoOverlap:;
+			add			ecx, 8
+			comiss		xmm1, xmmword ptr [esi+ecx]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
+			jae			EnterLoop
+         jmp         ExitLoop
+
+			align		16
+FoundOne:
 			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
-			pushad
+			push        eax
+         push        ecx
+         push        edx
+
 				// Recompute Index1
 				add			ecx, esi
 				sub			ecx, BoxListX
@@ -384,21 +389,17 @@ EnterLoop:
 				push		Remap
 				push		pairs
 				push		ecx
-//				push		Index0
-//				call		outputPair;
 				push		RIndex0
 				call		outputPair2;
 				add         esp, 16
 
-			popad
+			pop         edx
+         pop         ecx
+         pop         eax
 			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
+         jmp         NoOverlap
 
-			align		16
-NoOverlap:;
-			add			ecx, 8
-			comiss		xmm1, xmmword ptr [esi+ecx]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-			jae			EnterLoop
 ExitLoop:;
 		}
 #endif
