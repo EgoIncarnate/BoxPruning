@@ -359,22 +359,22 @@ ExitLoop:;
 			xor			ecx, ecx
 
 			align		16							// Align start of loop on 16-byte boundary for perf
-EnterLoop:
+CarefulLoop:
 			// ~11600 with this:
 			movaps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
 			cmpnleps	   xmm3, xmm2
 			movmskps	   eax, xmm3
 			cmp			eax, 0Ch
-			je          FoundOne
+			je          CarefulFoundOne
 
-NoOverlap:;
+CarefulNoOverlap:;
 			add			ecx, 8
 			comiss		xmm1, xmmword ptr [esi+ecx]		// [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-			jae			EnterLoop
+			jae			CarefulLoop
          jmp         ExitLoop
 
 			align		16
-FoundOne:
+CarefulFoundOne:;
 			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
 			push        eax
@@ -398,7 +398,7 @@ FoundOne:
          pop         eax
 			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
-         jmp         NoOverlap
+         jmp         CarefulNoOverlap
 
 ExitLoop:;
 		}
