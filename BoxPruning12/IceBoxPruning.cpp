@@ -257,75 +257,9 @@ static inline T* PtrAddBytes(T* ptr, ptrdiff_t bytes)
 	return (T*)((char*)ptr + bytes);
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/**
- *	Complete box pruning. Returns a list of overlapping pairs of boxes, each box of the pair belongs to the same set.
- *	\param		nb		[in] number of boxes
- *	\param		list	[in] list of boxes
- *	\param		pairs	[out] list of overlapping pairs
- *	\param		axes	[in] projection order (0,2,1 is often best)
- *	\return		true if success.
- */
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pairs)
+static void BoxPruningKernelIntrinsics(Container &pairs, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
 {
-	// Checkings
-	if(!nb || !list)
-		return false;
-
-	udword nbpad = (nb+15) & ~7; // Align up to multiple of 8, and add an extra 8 of padding.
-	ptrdiff_t BoxBytesP = nbpad*sizeof(FloatOrInt32);
 	ptrdiff_t BoxBytesN = -BoxBytesP;
-	ptrdiff_t BoxBytes3N = 3*BoxBytesN;
-
-	// BoxSOA: in order, arrays for MaxX,MinX (int), MaxY,MinY,MaxZ,MinZ (float).
-	FloatOrInt32* BoxSOA = (FloatOrInt32*)_aligned_malloc(BoxBytesP * 6, 32);
-
-	// Our default origin is actually pointing at array number 3 (MinY).
-	FloatOrInt32* BoxBase = PtrAddBytes(BoxSOA, 3*BoxBytesP);
-	FloatOrInt32* BoxEnd = BoxBase + nb;
-
-	udword* Remap;
-	//{
-		// Allocate some temporary data
-		float* PosList = new float[nb+1];
-
-		// 1) Build main list using the primary axis
-		for(udword i=0;i<nb;i++)
-			PosList[i] = list[i].mMin.x;
-		PosList[nb] = FLT_MAX;
-
-		// 2) Sort the list
-		static PRUNING_SORTER RS;	// Static for coherence
-		Remap = RS.Sort(PosList, nb+1).GetRanks();
-
-		// 3) Prepare the SoA box array
-		for(udword i=0;i<nb;i++)
-		{
-			const AABB& Box = list[Remap[i]];
-			FloatOrInt32 *OutBoxI = &BoxBase[i];
-			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = MungeFloat(Box.mMax.x);
-			PtrAddBytes(OutBoxI, 2*BoxBytesN)->s = MungeFloat(Box.mMin.x);
-			PtrAddBytes(OutBoxI, 1*BoxBytesN)->f = Box.mMax.y;
-			PtrAddBytes(OutBoxI, 0*BoxBytesP)->f = Box.mMin.y;
-			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = Box.mMax.z;
-			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = Box.mMin.z;
-		}
-		for(udword i=nb;i<nbpad;i++)
-		{
-			FloatOrInt32 *OutBoxI = &BoxBase[i];
-			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = -0x80000000;
-			PtrAddBytes(OutBoxI, 2*BoxBytesN)->s = 0x7fffffff;
-			PtrAddBytes(OutBoxI, 1*BoxBytesN)->f = -FLT_MAX;
-			PtrAddBytes(OutBoxI, 0*BoxBytesP)->f = FLT_MAX;
-			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = -FLT_MAX;
-			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = FLT_MAX;
-		}
-		DELETEARRAY(PosList);
-	//}
-
-	// 4) Prune the list
-#if 0
 	FloatOrInt32 *Box0Ptr = BoxBase; // corresponds to Index0
 	FloatOrInt32 *RunningPtr = BoxBase; // corresponds to RunningAddress
 	while(Box0Ptr < BoxEnd)
@@ -395,7 +329,150 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 		}
 		Box0Ptr++;
 	}
-#elif 1 // ASM AVX version
+}
+
+static void BoxPruningKernelSSE2(Container &pairs, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
+{
+	FloatOrInt32 *RunningPtr = BoxBase;
+	udword BoxToRemap;
+
+	__asm
+	{
+		mov			esi, [BoxBase];		// Box0Ptr
+		xor			edx, edx;
+		mov			ecx, [BoxBytesP];	// ecx = BoxBytesP
+		sub			edx, ecx;			// edx = BoxBytesN
+		mov			eax, [Remap];
+		sub			eax, esi;     		// BoxToRemap = Remap - BoxBase
+		mov			[BoxToRemap], eax;
+
+OuterLoop:
+		mov			edi, [RunningPtr];	// edi = Box1Ptr = RunningPtr
+		mov			eax, [esi + 2*edx];	// eax = MinLimit
+
+AdvanceRunningPtr:
+		cmp			eax, [edi + 2*edx];
+		lea			edi, [edi + 4];		// RunningPtr++
+		jg			AdvanceRunningPtr;
+
+		cmp			edi, [BoxEnd];		// RunningPtr >= BoxEnd?
+		jae			AllDone;
+
+		mov			[RunningPtr], edi;
+		lea			ebx, [esi + 2*edx];
+		mov			ebx, [ebx + edx];	// MaxLimit
+
+
+ReloadBeforeMainLoop:
+		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
+		shufps		xmm4, xmm4, 0;
+		movss		xmm5, [esi];		// xmm5 = Box0MinY
+		shufps		xmm5, xmm5, 0;
+		movss		xmm6, [esi + ecx];	// xmm6 = Box0MaxZ
+		shufps		xmm6, xmm6, 0;
+		movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
+		shufps		xmm7, xmm7, 0;
+
+		align		16
+MainLoop:
+		cmp			ebx, [edi + 2*edx + 12];	// Box[Index1+3].mMinX <= MaxLimit?
+		jl			ProcessTail;
+
+		movups		xmm0, [edi + edx];
+		cmpnleps	xmm0, xmm5;			// Box1MaxY > Box0MinY?
+
+		movups		xmm1, [edi];
+		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + ecx];
+		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + 2*ecx];
+		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		add			edi, 16;			// Box1Ptr += 4
+		movmskps	eax, xmm0;
+		test		eax, eax;
+		jz			MainLoop;
+
+		push		ecx;
+		push		edx;
+
+			push		eax;			// "mask" arg for ReportIntersections
+			lea			eax, [edi - 16];
+			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 4 - BoxBase]
+			push		eax;			// "remap_base" arg
+			mov			eax, [BoxToRemap];
+			push		dword ptr [eax + esi]; // "remap_id0" arg
+			push		[pairs];		// "pairs" arg
+			call		ReportIntersections;
+			add			esp, 16;
+
+		pop			edx;
+		pop			ecx;
+		jmp			ReloadBeforeMainLoop;
+
+		align		16
+ProcessTail:
+		cmp			ebx, [edi + 2*edx];	// Box[Index1].mMinX <= MaxLimit?
+		jl			LoopFooter;
+
+		movd		xmm1, ebx;			// MaxLimit
+		pshufd		xmm1, xmm1, 0;		// broadcast it!
+
+		movdqu		xmm0, [edi + 2*edx];// Box1MinX
+		pcmpgtd		xmm0, xmm1;			// OutsideMask
+
+		movups		xmm1, [edi + edx];
+		cmpnleps	xmm1, xmm5;			// Box1MaxY > Box0MinY?
+		andnps		xmm0, xmm1;
+
+		movups		xmm1, [edi];
+		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + ecx];
+		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + 2*ecx];
+		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movmskps	eax, xmm0;
+		test		eax, eax;
+		jz			LoopFooter;
+
+		push		ecx;
+		push		edx;
+
+			push		eax;			// "mask" arg for ReportIntersections
+			mov			eax, edi;
+			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - BoxBase]
+			push		eax;			// "remap_base" arg
+			mov			eax, [BoxToRemap];
+			push		dword ptr [eax + esi]; // "remap_id0" arg
+			push		[pairs];		// "pairs" arg
+			call		ReportIntersections;
+			add			esp, 16;
+
+		pop			edx;
+		pop			ecx;
+
+LoopFooter:
+		add			esi, 4;				// Box0Ptr++
+		cmp			esi, [BoxEnd];		// Box0Ptr < BoxEnd?
+		jb			OuterLoop;
+
+AllDone:
+	}
+}
+
+static void BoxPruningKernelAVX(Container &pairs, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
+{
 	static const udword PreAlignMasks[16] = {
 		 0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
 		~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u,
@@ -574,143 +651,87 @@ LoopFooter:
 AllDone:
 		vzeroupper;
 	}
-#else // ASM SSE2 version
-	FloatOrInt32 *RunningPtr = BoxBase;
-	udword BoxToRemap;
+}
 
-	__asm
-	{
-		mov			esi, [BoxBase];		// Box0Ptr
-		xor			edx, edx;
-		mov			ecx, [BoxBytesP];	// ecx = BoxBytesP
-		sub			edx, ecx;			// edx = BoxBytesN
-		mov			eax, [Remap];
-		sub			eax, esi;     		// BoxToRemap = Remap - BoxBase
-		mov			[BoxToRemap], eax;
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/**
+ *	Complete box pruning. Returns a list of overlapping pairs of boxes, each box of the pair belongs to the same set.
+ *	\param		nb		[in] number of boxes
+ *	\param		list	[in] list of boxes
+ *	\param		pairs	[out] list of overlapping pairs
+ *	\param		axes	[in] projection order (0,2,1 is often best)
+ *	\return		true if success.
+ */
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pairs)
+{
+	// Checkings
+	if(!nb || !list)
+		return false;
 
-OuterLoop:
-		mov			edi, [RunningPtr];	// edi = Box1Ptr = RunningPtr
-		mov			eax, [esi + 2*edx];	// eax = MinLimit
+	udword nbpad = (nb+15) & ~7; // Align up to multiple of 8, and add an extra 8 of padding.
+	ptrdiff_t BoxBytesP = nbpad*sizeof(FloatOrInt32);
+	ptrdiff_t BoxBytesN = -BoxBytesP;
+	ptrdiff_t BoxBytes3N = 3*BoxBytesN;
 
-AdvanceRunningPtr:
-		cmp			eax, [edi + 2*edx];
-		lea			edi, [edi + 4];		// RunningPtr++
-		jg			AdvanceRunningPtr;
+	// BoxSOA: in order, arrays for MaxX,MinX (int), MaxY,MinY,MaxZ,MinZ (float).
+	FloatOrInt32* BoxSOA = (FloatOrInt32*)_aligned_malloc(BoxBytesP * 6, 32);
 
-		cmp			edi, [BoxEnd];		// RunningPtr >= BoxEnd?
-		jae			AllDone;
+	// Our default origin is actually pointing at array number 3 (MinY).
+	FloatOrInt32* BoxBase = PtrAddBytes(BoxSOA, 3*BoxBytesP);
+	FloatOrInt32* BoxEnd = BoxBase + nb;
 
-		mov			[RunningPtr], edi;
-		lea			ebx, [esi + 2*edx];
-		mov			ebx, [ebx + edx];	// MaxLimit
+	udword* Remap;
+	//{
+		// Allocate some temporary data
+		float* PosList = new float[nb+1];
 
+		// 1) Build main list using the primary axis
+		for(udword i=0;i<nb;i++)
+			PosList[i] = list[i].mMin.x;
+		PosList[nb] = FLT_MAX;
 
-ReloadBeforeMainLoop:
-		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
-		shufps		xmm4, xmm4, 0;
-		movss		xmm5, [esi];		// xmm5 = Box0MinY
-		shufps		xmm5, xmm5, 0;
-		movss		xmm6, [esi + ecx];	// xmm6 = Box0MaxZ
-		shufps		xmm6, xmm6, 0;
-		movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
-		shufps		xmm7, xmm7, 0;
+		// 2) Sort the list
+		static PRUNING_SORTER RS;	// Static for coherence
+		Remap = RS.Sort(PosList, nb+1).GetRanks();
 
-		align		16
-MainLoop:
-		cmp			ebx, [edi + 2*edx + 12];	// Box[Index1+3].mMinX <= MaxLimit?
-		jl			ProcessTail;
+		// 3) Prepare the SoA box array
+		for(udword i=0;i<nb;i++)
+		{
+			const AABB& Box = list[Remap[i]];
+			FloatOrInt32 *OutBoxI = &BoxBase[i];
+			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = MungeFloat(Box.mMax.x);
+			PtrAddBytes(OutBoxI, 2*BoxBytesN)->s = MungeFloat(Box.mMin.x);
+			PtrAddBytes(OutBoxI, 1*BoxBytesN)->f = Box.mMax.y;
+			PtrAddBytes(OutBoxI, 0*BoxBytesP)->f = Box.mMin.y;
+			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = Box.mMax.z;
+			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = Box.mMin.z;
+		}
+		for(udword i=nb;i<nbpad;i++)
+		{
+			FloatOrInt32 *OutBoxI = &BoxBase[i];
+			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = -0x80000000;
+			PtrAddBytes(OutBoxI, 2*BoxBytesN)->s = 0x7fffffff;
+			PtrAddBytes(OutBoxI, 1*BoxBytesN)->f = -FLT_MAX;
+			PtrAddBytes(OutBoxI, 0*BoxBytesP)->f = FLT_MAX;
+			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = -FLT_MAX;
+			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = FLT_MAX;
+		}
+		DELETEARRAY(PosList);
+	//}
 
-		movups		xmm0, [edi + edx];
-		cmpnleps	xmm0, xmm5;			// Box1MaxY > Box0MinY?
+	// 4) Prune the list
+#if 0
+	BoxPruningKernelIntrinsics(pairs, BoxBase, BoxEnd, Remap, BoxBytesP);
+#else
+	int info[4];
+	__cpuid(info, 1);
 
-		movups		xmm1, [edi];
-		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
-		andps		xmm0, xmm1;
-
-		movups		xmm1, [edi + ecx];
-		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
-		andps		xmm0, xmm1;
-
-		movups		xmm1, [edi + 2*ecx];
-		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
-		andps		xmm0, xmm1;
-
-		add			edi, 16;			// Box1Ptr += 4
-		movmskps	eax, xmm0;
-		test		eax, eax;
-		jz			MainLoop;
-
-		push		ecx;
-		push		edx;
-
-			push		eax;			// "mask" arg for ReportIntersections
-			lea			eax, [edi - 16];
-			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 4 - BoxBase]
-			push		eax;			// "remap_base" arg
-			mov			eax, [BoxToRemap];
-			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
-			call		ReportIntersections;
-			add			esp, 16;
-
-		pop			edx;
-		pop			ecx;
-		jmp			ReloadBeforeMainLoop;
-
-		align		16
-ProcessTail:
-		cmp			ebx, [edi + 2*edx];	// Box[Index1].mMinX <= MaxLimit?
-		jl			LoopFooter;
-
-		movd		xmm1, ebx;			// MaxLimit
-		pshufd		xmm1, xmm1, 0;		// broadcast it!
-
-		movdqu		xmm0, [edi + 2*edx];// Box1MinX
-		pcmpgtd		xmm0, xmm1;			// OutsideMask
-
-		movups		xmm1, [edi + edx];
-		cmpnleps	xmm1, xmm5;			// Box1MaxY > Box0MinY?
-		andnps		xmm0, xmm1;
-
-		movups		xmm1, [edi];
-		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
-		andps		xmm0, xmm1;
-
-		movups		xmm1, [edi + ecx];
-		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
-		andps		xmm0, xmm1;
-
-		movups		xmm1, [edi + 2*ecx];
-		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
-		andps		xmm0, xmm1;
-
-		movmskps	eax, xmm0;
-		test		eax, eax;
-		jz			LoopFooter;
-
-		push		ecx;
-		push		edx;
-
-			push		eax;			// "mask" arg for ReportIntersections
-			mov			eax, edi;
-			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - BoxBase]
-			push		eax;			// "remap_base" arg
-			mov			eax, [BoxToRemap];
-			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
-			call		ReportIntersections;
-			add			esp, 16;
-
-		pop			edx;
-		pop			ecx;
-
-LoopFooter:
-		add			esi, 4;				// Box0Ptr++
-		cmp			esi, [BoxEnd];		// Box0Ptr < BoxEnd?
-		jb			OuterLoop;
-
-AllDone:
-	}
+	// Use AVX if CPU and OS support it
+	if ((info[2] & 0x18000000) == 0x18000000)
+		BoxPruningKernelAVX(pairs, BoxBase, BoxEnd, Remap, BoxBytesP);
+	else
+		BoxPruningKernelSSE2(pairs, BoxBase, BoxEnd, Remap, BoxBytesP);
 #endif
 
 	_aligned_free(BoxSOA);
