@@ -395,7 +395,11 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 		}
 		Box0Ptr++;
 	}
-#elif 0 // ASM AVX version
+#elif 1 // ASM AVX version
+	static const udword PreAlignMasks[16] = {
+		 0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
+		~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u,
+	};
 	FloatOrInt32 *RunningPtr = BoxBase;
 	udword BoxToRemap;
 
@@ -424,11 +428,59 @@ AdvanceRunningPtr:
 		jae				AllDone;
 
 		mov				[RunningPtr], edi;
-
-ReloadBeforeMainLoop:
 		lea				ebx, [esi + 2*edx];
 		mov				ebx, [ebx + edx];	// MaxLimit
 
+		// First iter tries to get us to alignment
+		vbroadcastss	ymm4, [esi + edx];	// ymm4 = Box0MaxY
+		vbroadcastss	ymm5, [esi];		// ymm5 = Box0MinY
+		vbroadcastss	ymm6, [esi + ecx];	// ymm6 = Box0MaxZ
+		vbroadcastss	ymm7, [esi + 2*ecx]; // ymm7 = Box0MinZ
+
+		// Don't even bother trying if there's only a handful candidates for this box
+		cmp				ebx, [edi + 2*edx + 28];	// Box[Index1+7].mMinX <= MaxLimit?
+		jl				ProcessTail;
+
+		mov				eax, edi;
+		and				eax, 31;			// address mod 32
+		neg				eax;
+		vmovups			ymm0, [PreAlignMasks + 32 + eax];
+
+		and				edi, not 31;		// ka-chunk!
+
+		vcmpltps		ymm1, ymm5, [edi + edx];	// Box1MaxY > Box0MinY?
+		vandps 			ymm0, ymm0, ymm1;
+		vcmpgtps		ymm1, ymm4, [edi];			// Box1MinY < Box0MaxY?
+		vandps			ymm0, ymm0, ymm1;
+		vcmpltps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ > Box0MinZ?
+		vandps			ymm0, ymm0, ymm1;
+		vcmpgtps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ < Box0MaxY?
+		vandps			ymm0, ymm0, ymm1;
+
+		add				edi, 32;
+		vmovmskps		eax, ymm0;
+		test			eax, eax;
+		jz				MainLoop;
+
+		push			ecx;
+		push			edx;
+		vzeroupper;
+
+			push		eax;			// "mask" arg for ReportIntersections
+			lea			eax, [edi - 32];
+			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 8 - BoxBase]
+			push		eax;			// "remap_base" arg
+			mov			eax, [BoxToRemap];
+			push		dword ptr [eax + esi]; // "remap_id0" arg
+			push		[pairs];		// "pairs" arg
+			call		ReportIntersections;
+			add			esp, 16;
+
+		pop				edx;
+		pop				ecx;
+		jmp				ReloadBeforeMainLoop;
+
+ReloadBeforeMainLoop:
 		vbroadcastss	ymm4, [esi + edx];	// ymm4 = Box0MaxY
 		vbroadcastss	ymm5, [esi];		// ymm5 = Box0MinY
 		vbroadcastss	ymm6, [esi + ecx];	// ymm6 = Box0MaxZ
@@ -549,11 +601,11 @@ AdvanceRunningPtr:
 		jae			AllDone;
 
 		mov			[RunningPtr], edi;
-
-ReloadBeforeMainLoop:
 		lea			ebx, [esi + 2*edx];
 		mov			ebx, [ebx + edx];	// MaxLimit
 
+
+ReloadBeforeMainLoop:
 		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
 		shufps		xmm4, xmm4, 0;
 		movss		xmm5, [esi];		// xmm5 = Box0MinY
