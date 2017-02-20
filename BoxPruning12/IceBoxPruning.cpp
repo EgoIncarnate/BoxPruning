@@ -149,12 +149,11 @@ static inline udword MungeFloat(float f)
     union
     {
         float f;
-        udword u;
         sdword s;
     } u;
     u.f = f + g_global_this_always_zero;  // NOT a nop! Canonicalizes -0.0f to +0.0f
-    udword toggle = (u.s >> 31) | (1u << 31);
-    return u.u ^ toggle;
+    udword toggle = (u.s >> 31) & ~(1u << 31);
+    return u.s ^ toggle;
 }
 //#pragma float_control(pop)
 
@@ -169,8 +168,8 @@ struct SIMD_AABB_X
 		mMaxX	= MungeFloat(b.mMax.x);
 	}
 
-    udword mMinX;
-    udword mMaxX;
+    sdword mMinX;
+    sdword mMaxX;
 };
 
 struct SIMD_AABB_YZ
@@ -272,11 +271,11 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 			BoxListX[i].InitFrom(list[SortedIndex]);
 			BoxListYZ[i].InitFrom(list[SortedIndex]);
 		}
-		BoxListX[nb+0].mMinX = ~0u;
-		BoxListX[nb+1].mMinX = ~0u;
-		BoxListX[nb+2].mMinX = ~0u;
-		BoxListX[nb+3].mMinX = ~0u;
-		BoxListX[nb+4].mMinX = ~0u;
+		BoxListX[nb+0].mMinX = 0x7fffffff;
+		BoxListX[nb+1].mMinX = 0x7fffffff;
+		BoxListX[nb+2].mMinX = 0x7fffffff;
+		BoxListX[nb+3].mMinX = 0x7fffffff;
+		BoxListX[nb+4].mMinX = 0x7fffffff;
 		DELETEARRAY(PosList);
 //	}
 
@@ -287,7 +286,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	{
 		const SIMD_AABB_X& Box0X = BoxListX[Index0];
 
-		const udword MinLimit = Box0X.mMinX;
+		const sdword MinLimit = Box0X.mMinX;
 		while(BoxListX[RunningAddress++].mMinX<MinLimit);
 
         if(BoxListX[RunningAddress].mMinX > Box0X.mMaxX)
@@ -319,7 +318,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 			align		16							// Align start of loop on 16-byte boundary for perf
 FastLoop:
             cmp         edi, [esi+ecx+24]           // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
-            jb          CarefulLoop // nope!
+            jl          CarefulLoop // nope!
 
             // Unroll 0
             movaps      xmm3, xmmword ptr [edx+ecx*2+0]  // Box1YZ
@@ -385,7 +384,7 @@ FastFoundOne:
 
 CarefulLoop:
             cmp         edi, [esi+ecx]                   // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-            jb          ExitLoop
+            jl          ExitLoop
 
 			// ~11600 with this:
 			movaps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
