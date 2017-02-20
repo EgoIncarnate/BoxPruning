@@ -532,7 +532,7 @@ static void RunValidityTest()
 int main(int argc, char* argv[])
 {
 	RunPerformanceTest();
-//	RunValidityTest();
+	RunValidityTest();
 //	RunEdgeCase();
 
 	//while(!_kbhit());

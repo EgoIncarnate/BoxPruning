@@ -298,32 +298,23 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 
 #define VERSION4
 #ifdef VERSION4
-		const udword MaxLimit = Box0X.mMaxX;
 		const udword RIndex0 = Remap[Index0];
 
-		__m128	SavedXMM1;
 		__m128	SavedXMM2;
 
 		_asm
 		{
             mov			edx, BoxListYZ				// edx = BoxListYZ
-			mov			edi, Index0					// edi = Index0
-			add			edi, edi					// edi = Index0 * 2
-			lea			esi, dword ptr [edx+edi*8]	// esi = BoxListYZ + Index0*16 = &BoxListYZ[Index0] (*16 because sizeof(SIMD_AABB_YZ)==16)
+			mov			eax, Index0
+			shl			eax, 3						// eax = Index0 * 8
 
-            movaps		xmm2, xmmword ptr [esi]		// xmm2 = BoxListYZ[Index0] = Box0YZ <= that's the _mm_load_ps in SIMD_OVERLAP_INIT
+            movaps		xmm2, xmmword ptr [edx+eax*2]// xmm2 = BoxListYZ[Index0] = Box0YZ <= that's the _mm_load_ps in SIMD_OVERLAP_INIT
 			shufps		xmm2, xmm2, 4Eh				// that's our _mm_shuffle_ps in SIMD_OVERLAP_INIT
 
-			mov			edi, RunningAddress			// edi = Index1
-			mov			eax, edi					// eax = Index1
-			shl			eax, 4						// eax = Index1 * 16
-			add			edx, eax					// edx = &BoxListYZ[Index1]
-
-			mov			eax, BoxListX				// eax = BoxListX
-			lea			esi, dword ptr [eax+edi*8]	// esi = BoxListX + Index1*8 = &BoxListX[Index1] (*8 because sizeof(SIMD_AABB_X)==8)
-
-            mov         edi, MaxLimit               // edi = MaxLimit
-			xor			ecx, ecx
+			mov			ecx, RunningAddress			// ecx = Index1
+			shl			ecx, 3						// ecx = Index1*3
+			mov			esi, BoxListX				// esi = BoxListX
+			mov			edi, [esi+eax+4]			// edi = BoxListX[Index0].mMaxX = MaxLimit
 
 			align		16							// Align start of loop on 16-byte boundary for perf
 FastLoop:
@@ -368,7 +359,6 @@ FoundSlot1:
 FoundSlot0:
             add         ecx, 8
 FastFoundOne:
-			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
 			push        eax
             push        ecx
@@ -389,13 +379,12 @@ FastFoundOne:
 			pop         edx
             pop         ecx
             pop         eax
-			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
             jmp         FastLoop
 
 
 CarefulLoop:
-            cmp         edi, [esi+ecx]                   // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
+            cmp         edi, [esi+ecx]                   // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
             jb          ExitLoop
 
 			// ~11600 with this:
@@ -407,7 +396,6 @@ CarefulLoop:
 			jne         CarefulLoop
 
          // found one!
-			movaps		SavedXMM1, xmm1
 			movaps		SavedXMM2, xmm2
 			push        eax
             push        ecx
@@ -428,7 +416,6 @@ CarefulLoop:
 			pop         edx
             pop         ecx
             pop         eax
-			movaps		xmm1, SavedXMM1
 			movaps		xmm2, SavedXMM2
             jmp         CarefulLoop
 

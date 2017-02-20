@@ -45,6 +45,7 @@ Temporary Items
 # VS junk, build results
 *.sdf
 *.suo
+*.opensdf
 Release
 Debug
 ipch
