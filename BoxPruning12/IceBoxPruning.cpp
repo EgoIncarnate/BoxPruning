@@ -216,9 +216,9 @@ static void __cdecl outputPair(udword id0, udword id1, Container& pairs, const u
 	pairs.Add(remap[id0]).Add(remap[id1]);
 }
 
-static void __cdecl outputPair2(udword id0, udword id1, Container& pairs, const udword* remap)
+static void __cdecl outputPair2(udword id0, udword id1, Container& pairs)
 {
-	pairs.Add(id0).Add(remap[id1]);
+	pairs.Add(id0).Add(id1);
 }
 
 /*static void debug(udword id0, udword id1, Container& pairs, const udword* remap)
@@ -377,14 +377,14 @@ FastFoundOne:
 				// Recompute Index1
                 lea         ecx, [ecx+esi-8]
 				sub			ecx, BoxListX
-				shr			ecx, 3
+				shr			ecx, 1
+				mov			eax, Remap
 
-				push		Remap
 				push		pairs
-				push		ecx
+				push		dword ptr [eax+ecx] // Remap[Index1]
 				push		RIndex0
 				call		outputPair2;
-				add         esp, 16
+				add         esp, 12
 
 			pop         edx
             pop         ecx
@@ -416,14 +416,14 @@ CarefulLoop:
 				// Recompute Index1
                 lea         ecx, [ecx+esi-8]
 				sub			ecx, BoxListX
-				shr			ecx, 3
+				shr			ecx, 1
+				mov			eax, Remap
 
-				push		Remap
 				push		pairs
-				push		ecx
+				push		dword ptr [eax+ecx] // Remap[Index1]
 				push		RIndex0
 				call		outputPair2;
-				add         esp, 16
+				add         esp, 12
 
 			pop         edx
             pop         ecx
