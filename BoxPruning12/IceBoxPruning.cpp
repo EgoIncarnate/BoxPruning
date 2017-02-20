@@ -237,11 +237,11 @@ static inline udword Ctz32(udword x)
 }
 
 // Reports a bunch of intersections as specified by a base index and a bit mask.
-static void ReportIntersections(Container& pairs, udword remap_id0, const udword* remap, uword base_id1, udword mask)
+static void __cdecl ReportIntersections(Container& pairs, udword remap_id0, const udword* remap_base, udword mask)
 {
 	while (mask)
 	{
-		pairs.Add(remap_id0).Add(remap[base_id1 + Ctz32(mask)]);
+		pairs.Add(remap_id0).Add(remap_base[Ctz32(mask)]);
 		mask &= mask - 1;
 	}
 }
@@ -325,12 +325,15 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	//}
 
 	// 4) Prune the list
+#if 0
 	FloatOrInt32 *Box0Ptr = BoxBase; // corresponds to Index0
 	FloatOrInt32 *RunningPtr = BoxBase; // corresponds to RunningAddress
-	while(Box0Ptr < BoxEnd && RunningPtr < BoxEnd)
+	while(Box0Ptr < BoxEnd)
 	{
 		const sdword MinLimit = PtrAddBytes(Box0Ptr, 2*BoxBytesN)->s;
 		while (PtrAddBytes(RunningPtr++, 2*BoxBytesN)->s < MinLimit);
+		if (RunningPtr >= BoxEnd)
+			break;
 
 		const FloatOrInt32 *MaxLimitPtr = PtrAddBytes(PtrAddBytes(Box0Ptr, 2*BoxBytesN), BoxBytesN);
 		const sdword MaxLimit = MaxLimitPtr->s;
@@ -363,7 +366,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
-				ReportIntersections(pairs, RIndex0, Remap, (Box1Ptr - 4) - BoxBase, Mask);
+				ReportIntersections(pairs, RIndex0, Remap + ((Box1Ptr - 4) - BoxBase), Mask);
 		}
 
 		// Tail group: first box is in, but one or more boxes with mMinX past MaxLimit inside.
@@ -388,10 +391,148 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
-				ReportIntersections(pairs, RIndex0, Remap, Box1Ptr - BoxBase, Mask);
+				ReportIntersections(pairs, RIndex0, Remap + (Box1Ptr - BoxBase), Mask);
 		}
 		Box0Ptr++;
 	}
+#else // ASM version
+	FloatOrInt32 *RunningPtr = BoxBase;
+	udword BoxToRemap;
+
+	__asm
+	{
+		mov			esi, [BoxBase];		// Box0Ptr
+		xor			edx, edx;
+		mov			ecx, [BoxBytesP];	// ecx = BoxBytesP
+		sub			edx, ecx;			// edx = BoxBytesN
+		mov			eax, [Remap];
+		sub			eax, esi;     		// BoxToRemap = Remap - BoxBase
+		mov			[BoxToRemap], eax;
+
+OuterLoop:
+		mov			edi, [RunningPtr];	// edi = Box1Ptr = RunningPtr
+		mov			eax, [esi + 2*edx];	// eax = MinLimit
+
+AdvanceRunningPtr:
+		cmp			eax, [edi + 2*edx];
+		lea			edi, [edi + 4];		// RunningPtr++
+		jg			AdvanceRunningPtr;
+
+		cmp			edi, [BoxEnd];		// RunningPtr >= BoxEnd?
+		jae			AllDone;
+
+		mov			[RunningPtr], edi;
+
+ReloadBeforeMainLoop:
+		lea			ebx, [esi + 2*edx];
+		mov			ebx, [ebx + edx];	// MaxLimit
+
+		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
+		shufps		xmm4, xmm4, 0;
+		movss		xmm5, [esi];		// xmm5 = Box0MinY
+		shufps		xmm5, xmm5, 0;
+		movss		xmm6, [esi + ecx];	// xmm6 = Box0MaxZ
+		shufps		xmm6, xmm6, 0;
+		movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
+		shufps		xmm7, xmm7, 0;
+
+		align		16
+MainLoop:
+		cmp			ebx, [edi + 2*edx + 12];	// Box[Index1+3].mMinX <= MaxLimit?
+		jl			ProcessTail;
+
+		movups		xmm0, [edi + edx];
+		cmpnleps	xmm0, xmm5;			// Box1MaxY > Box0MinY?
+
+		movups		xmm1, [edi];
+		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + ecx];
+		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + 2*ecx];
+		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		add			edi, 16;			// Box1Ptr += 4
+		movmskps	eax, xmm0;
+		test		eax, eax;
+		jz			MainLoop;
+
+		push		ecx;
+		push		edx;
+
+			push		eax;			// "mask" arg for ReportIntersections
+			lea			eax, [edi - 16];
+			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 4 - BoxBase]
+			push		eax;			// "remap_base" arg
+			mov			eax, [BoxToRemap];
+			push		dword ptr [eax + esi]; // "remap_id0" arg
+			push		[pairs];		// "pairs" arg
+			call		ReportIntersections;
+			add			esp, 16;
+
+		pop			edx;
+		pop			ecx;
+		jmp			ReloadBeforeMainLoop;
+
+		align		16
+ProcessTail:
+		cmp			ebx, [edi + 2*edx];	// Box[Index1].mMinX <= MaxLimit?
+		jl			LoopFooter;
+
+		movd		xmm1, ebx;			// MaxLimit
+		pshufd		xmm1, xmm1, 0;		// broadcast it!
+
+		movdqu		xmm0, [edi + 2*edx];// Box1MinX
+		pcmpgtd		xmm0, xmm1;			// OutsideMask
+
+		movups		xmm1, [edi + edx];
+		cmpnleps	xmm1, xmm5;			// Box1MaxY > Box0MinY?
+		andnps		xmm0, xmm1;
+
+		movups		xmm1, [edi];
+		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + ecx];
+		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
+		andps		xmm0, xmm1;
+
+		movups		xmm1, [edi + 2*ecx];
+		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movmskps	eax, xmm0;
+		test		eax, eax;
+		jz			LoopFooter;
+
+		push		ecx;
+		push		edx;
+
+			push		eax;			// "mask" arg for ReportIntersections
+			mov			eax, edi;
+			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - BoxBase]
+			push		eax;			// "remap_base" arg
+			mov			eax, [BoxToRemap];
+			push		dword ptr [eax + esi]; // "remap_id0" arg
+			push		[pairs];		// "pairs" arg
+			call		ReportIntersections;
+			add			esp, 16;
+
+		pop			edx;
+		pop			ecx;
+
+LoopFooter:
+		add			esi, 4;				// Box0Ptr++
+		cmp			esi, [BoxEnd];		// Box0Ptr < BoxEnd?
+		jb			OuterLoop;
+
+AllDone:
+	}
+#endif
 
 	DELETEARRAY(BoxSOA);
 	return true;
