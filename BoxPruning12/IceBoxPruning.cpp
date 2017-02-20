@@ -144,13 +144,15 @@ bool Meshmerizer::BipartiteBoxPruning(udword nb0, const AABB* list0, udword nb1,
 // instead.
 float g_global_this_always_zero = 0.0f;
 
+union FloatOrInt32
+{
+	float f;
+	sdword s;
+};
+
 static inline udword MungeFloat(float f)
 {
-    union
-    {
-        float f;
-        sdword s;
-    } u;
+	FloatOrInt32 u;
     u.f = f + g_global_this_always_zero;  // NOT a nop! Canonicalizes -0.0f to +0.0f
     udword toggle = (u.s >> 31) & ~(1u << 31);
     return u.s ^ toggle;
@@ -226,10 +228,33 @@ static void __cdecl outputPair2(udword id0, udword id1, Container& pairs)
 		int FoundIt=0;
 }*/
 
+// Count trailing zeroes
+static inline udword Ctz32(udword x)
+{
+	unsigned long idx;
+	_BitScanForward(&idx, x);
+	return idx;
+}
+
+// Reports a bunch of intersections as specified by a base index and a bit mask.
+static void ReportIntersections(Container& pairs, udword remap_id0, const udword* remap, uword base_id1, udword mask)
+{
+	while (mask)
+	{
+		pairs.Add(remap_id0).Add(remap[base_id1 + Ctz32(mask)]);
+		mask &= mask - 1;
+	}
+}
 
 static void Error()
 {
 	printf("ERROR!\n");
+}
+
+template<typename T>
+static inline T* PtrAddBytes(T* ptr, ptrdiff_t bytes)
+{
+	return (T*)((char*)ptr + bytes);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -248,11 +273,20 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	if(!nb || !list)
 		return false;
 
-	SIMD_AABB_X* BoxListX = new SIMD_AABB_X[nb+5];
-	SIMD_AABB_YZ* BoxListYZ = (SIMD_AABB_YZ*)_aligned_malloc(sizeof(SIMD_AABB_YZ)*(nb+1), 16);
+	udword nbpad = nb+5;
+	ptrdiff_t BoxBytesP = nbpad*sizeof(FloatOrInt32);
+	ptrdiff_t BoxBytesN = -BoxBytesP;
+	ptrdiff_t BoxBytes3N = 3*BoxBytesN;
+
+	// BoxSOA: in order, arrays for MaxX,MinX (int), MaxY,MinY,MaxZ,MinZ (float).
+	FloatOrInt32* BoxSOA = new FloatOrInt32[nbpad*6];
+
+	// Our default origin is actually pointing at array number 3 (MinY).
+	FloatOrInt32* BoxBase = PtrAddBytes(BoxSOA, 3*BoxBytesP);
+	FloatOrInt32* BoxEnd = BoxBase + nb;
 
 	udword* Remap;
-//	{
+	//{
 		// Allocate some temporary data
 		float* PosList = new float[nb+1];
 
@@ -265,168 +299,101 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 		static PRUNING_SORTER RS;	// Static for coherence
 		Remap = RS.Sort(PosList, nb+1).GetRanks();
 
+		// 3) Prepare the SoA box array
 		for(udword i=0;i<nb;i++)
 		{
-			const udword SortedIndex = Remap[i];
-			BoxListX[i].InitFrom(list[SortedIndex]);
-			BoxListYZ[i].InitFrom(list[SortedIndex]);
+			const AABB& Box = list[Remap[i]];
+			FloatOrInt32 *OutBoxI = &BoxBase[i];
+			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = MungeFloat(Box.mMax.x);
+			PtrAddBytes(OutBoxI, 2*BoxBytesN)->s = MungeFloat(Box.mMin.x);
+			PtrAddBytes(OutBoxI, 1*BoxBytesN)->f = Box.mMax.y;
+			PtrAddBytes(OutBoxI, 0*BoxBytesP)->f = Box.mMin.y;
+			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = Box.mMax.z;
+			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = Box.mMin.z;
 		}
-		BoxListX[nb+0].mMinX = 0x7fffffff;
-		BoxListX[nb+1].mMinX = 0x7fffffff;
-		BoxListX[nb+2].mMinX = 0x7fffffff;
-		BoxListX[nb+3].mMinX = 0x7fffffff;
-		BoxListX[nb+4].mMinX = 0x7fffffff;
-		DELETEARRAY(PosList);
-//	}
-
-	// 3) Prune the list
-	udword RunningAddress = 0;
-	udword Index0 = 0;
-	while(RunningAddress<nb && Index0<nb)
-	{
-		const SIMD_AABB_X& Box0X = BoxListX[Index0];
-
-		const sdword MinLimit = Box0X.mMinX;
-		while(BoxListX[RunningAddress++].mMinX<MinLimit);
-
-        if(BoxListX[RunningAddress].mMinX > Box0X.mMaxX)
-        {
-            Index0++;
-            continue;
-        }
-
-#define VERSION4
-#ifdef VERSION4
-		const udword RIndex0 = Remap[Index0];
-
-		__m128	SavedXMM2;
-
-		_asm
+		for(udword i=nb;i<nbpad;i++)
 		{
-            mov			edx, BoxListYZ				// edx = BoxListYZ
-			mov			eax, Index0
-			shl			eax, 3						// eax = Index0 * 8
-
-            movaps		xmm2, xmmword ptr [edx+eax*2]// xmm2 = BoxListYZ[Index0] = Box0YZ <= that's the _mm_load_ps in SIMD_OVERLAP_INIT
-			shufps		xmm2, xmm2, 4Eh				// that's our _mm_shuffle_ps in SIMD_OVERLAP_INIT
-
-			mov			ecx, RunningAddress			// ecx = Index1
-			shl			ecx, 3						// ecx = Index1*3
-			mov			esi, BoxListX				// esi = BoxListX
-			mov			edi, [esi+eax+4]			// edi = BoxListX[Index0].mMaxX = MaxLimit
-
-			align		16							// Align start of loop on 16-byte boundary for perf
-FastLoop:
-            cmp         edi, [esi+ecx+24]           // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit - can safely do another 4 iters of this?
-            jl          CarefulLoop // nope!
-
-            // Unroll 0
-            movaps      xmm3, xmmword ptr [edx+ecx*2+0]  // Box1YZ
-            cmpnleps    xmm3, xmm2
-            movmskps    eax, xmm3
-            cmp         eax, 0Ch
-            je          FoundSlot0
-
-            // Unroll 1
-            movaps      xmm3, xmmword ptr [edx+ecx*2+16] // Box1YZ
-            cmpnleps    xmm3, xmm2
-            movmskps    eax, xmm3
-            cmp         eax, 0Ch
-            je          FoundSlot1
-
-            // Unroll 2
-            movaps      xmm3, xmmword ptr [edx+ecx*2+32]  // Box1YZ
-            cmpnleps    xmm3, xmm2
-            movmskps    eax, xmm3
-            cmp         eax, 0Ch
-            je          FoundSlot2
-
-            // Unroll 3
-            movaps      xmm3, xmmword ptr [edx+ecx*2+48]  // Box1YZ
-            add         ecx, 32                           // Advance
-            cmpnleps    xmm3, xmm2
-            movmskps    eax, xmm3
-            cmp         eax, 0Ch
-            jne         FastLoop
-
-            jmp         FastFoundOne
-            // slots 2-0 fall through for increment (I'm being lazy...)
-FoundSlot2:
-            add         ecx, 8
-FoundSlot1:
-            add         ecx, 8
-FoundSlot0:
-            add         ecx, 8
-FastFoundOne:
-			movaps		SavedXMM2, xmm2
-			push        eax
-            push        ecx
-            push        edx
-
-				// Recompute Index1
-                lea         ecx, [ecx+esi-8]
-				sub			ecx, BoxListX
-				shr			ecx, 1
-				mov			eax, Remap
-
-				push		pairs
-				push		dword ptr [eax+ecx] // Remap[Index1]
-				push		RIndex0
-				call		outputPair2;
-				add         esp, 12
-
-			pop         edx
-            pop         ecx
-            pop         eax
-			movaps		xmm2, SavedXMM2
-            jmp         FastLoop
-
-
-CarefulLoop:
-            cmp         edi, [esi+ecx]                   // [esi] = BoxListX[Index1].mMinX, compared to MaxLimit
-            jl          ExitLoop
-
-			// ~11600 with this:
-			movaps		xmm3, xmmword ptr [edx+ecx*2]		// Box1YZ
-            add         ecx, 8
-			cmpnleps    xmm3, xmm2
-			movmskps    eax, xmm3
-			cmp			eax, 0Ch
-			jne         CarefulLoop
-
-         // found one!
-			movaps		SavedXMM2, xmm2
-			push        eax
-            push        ecx
-            push        edx
-
-				// Recompute Index1
-                lea         ecx, [ecx+esi-8]
-				sub			ecx, BoxListX
-				shr			ecx, 1
-				mov			eax, Remap
-
-				push		pairs
-				push		dword ptr [eax+ecx] // Remap[Index1]
-				push		RIndex0
-				call		outputPair2;
-				add         esp, 12
-
-			pop         edx
-            pop         ecx
-            pop         eax
-			movaps		xmm2, SavedXMM2
-            jmp         CarefulLoop
-
-ExitLoop:;
+			FloatOrInt32 *OutBoxI = &BoxBase[i];
+			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = -0x80000000;
+			PtrAddBytes(OutBoxI, 2*BoxBytesN)->s = 0x7fffffff;
+			PtrAddBytes(OutBoxI, 1*BoxBytesN)->f = -FLT_MAX;
+			PtrAddBytes(OutBoxI, 0*BoxBytesP)->f = FLT_MAX;
+			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = -FLT_MAX;
+			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = FLT_MAX;
 		}
-#endif
-		
-		Index0++;
+		DELETEARRAY(PosList);
+	//}
+
+	// 4) Prune the list
+	FloatOrInt32 *Box0Ptr = BoxBase; // corresponds to Index0
+	FloatOrInt32 *RunningPtr = BoxBase; // corresponds to RunningAddress
+	while(Box0Ptr < BoxEnd && RunningPtr < BoxEnd)
+	{
+		const sdword MinLimit = PtrAddBytes(Box0Ptr, 2*BoxBytesN)->s;
+		while (PtrAddBytes(RunningPtr++, 2*BoxBytesN)->s < MinLimit);
+
+		const FloatOrInt32 *MaxLimitPtr = PtrAddBytes(PtrAddBytes(Box0Ptr, 2*BoxBytesN), BoxBytesN);
+		const sdword MaxLimit = MaxLimitPtr->s;
+		udword RIndex0 = Remap[Box0Ptr - BoxBase];
+
+		__m128i MaxLimitVec = _mm_set1_epi32(MaxLimitPtr->s);
+		__m128 Box0MaxY = _mm_set1_ps(PtrAddBytes(Box0Ptr, 1*BoxBytesN)->f);
+		__m128 Box0MinY = _mm_set1_ps(PtrAddBytes(Box0Ptr, 0*BoxBytesP)->f);
+		__m128 Box0MaxZ = _mm_set1_ps(PtrAddBytes(Box0Ptr, 1*BoxBytesP)->f);
+		__m128 Box0MinZ = _mm_set1_ps(PtrAddBytes(Box0Ptr, 2*BoxBytesP)->f);
+
+		// Main loop
+		const FloatOrInt32 *Box1Ptr = RunningPtr;
+		while (PtrAddBytes(Box1Ptr + 3, 2*BoxBytesN)->s <= MaxLimit) // while Box[Index1+3].mMinX <= MaxLimit
+		{
+			// Load 4 boxes worth
+			__m128 Box1MaxY = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 1*BoxBytesN)->f);
+			__m128 Box1MinY = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 0*BoxBytesP)->f);
+			__m128 Box1MaxZ = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 1*BoxBytesP)->f);
+			__m128 Box1MinZ = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 2*BoxBytesP)->f);
+			Box1Ptr += 4;
+
+			// Intersection test:
+			//  !(b.MaxY <= a.MinY) && (b.MinY < a.MaxY) && !(b.MaxZ <= a.MinZ) && (b.MinZ <= a.MaxZ)
+			__m128 Cmp;
+			Cmp = _mm_cmpnle_ps(Box1MaxY, Box0MinY);
+			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinY, Box0MaxY));
+			Cmp = _mm_and_ps(Cmp, _mm_cmpnle_ps(Box1MaxZ, Box0MinZ));
+			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinZ, Box0MaxZ));
+
+			int Mask = _mm_movemask_ps(Cmp);
+			if (Mask)
+				ReportIntersections(pairs, RIndex0, Remap, (Box1Ptr - 4) - BoxBase, Mask);
+		}
+
+		// Tail group: first box is in, but one or more boxes with mMinX past MaxLimit inside.
+		if (PtrAddBytes(Box1Ptr, 2*BoxBytesN)->s <= MaxLimit)
+		{
+			__m128i Box1MinX = _mm_loadu_si128((const __m128i *)&PtrAddBytes(Box1Ptr, 2*BoxBytesN)->s);
+			__m128 OutsideMask = _mm_castsi128_ps(_mm_cmpgt_epi32(Box1MinX, MaxLimitVec));
+
+			// Load 4 boxes worth
+			__m128 Box1MaxY = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 1*BoxBytesN)->f);
+			__m128 Box1MinY = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 0*BoxBytesP)->f);
+			__m128 Box1MaxZ = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 1*BoxBytesP)->f);
+			__m128 Box1MinZ = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 2*BoxBytesP)->f);
+
+			// Intersection test:
+			//  !(b.MaxY <= a.MinY) && (b.MinY < a.MaxY) && !(b.MaxZ <= a.MinZ) && (b.MinZ <= a.MaxZ)
+			__m128 Cmp;
+			Cmp = _mm_andnot_ps(OutsideMask, _mm_cmpnle_ps(Box1MaxY, Box0MinY));
+			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinY, Box0MaxY));
+			Cmp = _mm_and_ps(Cmp, _mm_cmpnle_ps(Box1MaxZ, Box0MinZ));
+			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinZ, Box0MaxZ));
+
+			int Mask = _mm_movemask_ps(Cmp);
+			if (Mask)
+				ReportIntersections(pairs, RIndex0, Remap, Box1Ptr - BoxBase, Mask);
+		}
+		Box0Ptr++;
 	}
 
-	_aligned_free(BoxListYZ);
-	DELETEARRAY(BoxListX);
+	DELETEARRAY(BoxSOA);
 	return true;
 }
 
