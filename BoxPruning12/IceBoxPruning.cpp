@@ -273,13 +273,13 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	if(!nb || !list)
 		return false;
 
-	udword nbpad = nb+8;
+	udword nbpad = (nb+15) & ~7; // Align up to multiple of 8, and add an extra 8 of padding.
 	ptrdiff_t BoxBytesP = nbpad*sizeof(FloatOrInt32);
 	ptrdiff_t BoxBytesN = -BoxBytesP;
 	ptrdiff_t BoxBytes3N = 3*BoxBytesN;
 
 	// BoxSOA: in order, arrays for MaxX,MinX (int), MaxY,MinY,MaxZ,MinZ (float).
-	FloatOrInt32* BoxSOA = new FloatOrInt32[nbpad*6];
+	FloatOrInt32* BoxSOA = (FloatOrInt32*)_aligned_malloc(BoxBytesP * 6, 32);
 
 	// Our default origin is actually pointing at array number 3 (MinY).
 	FloatOrInt32* BoxBase = PtrAddBytes(BoxSOA, 3*BoxBytesP);
@@ -661,7 +661,7 @@ AllDone:
 	}
 #endif
 
-	DELETEARRAY(BoxSOA);
+	_aligned_free(BoxSOA);
 	return true;
 }
 
