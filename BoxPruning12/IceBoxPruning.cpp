@@ -320,18 +320,18 @@ MainLoop:
 		jl			ProcessTail;
 
 		movups		xmm0, [edi + edx];
-		cmpnleps	xmm0, xmm5;			// Box1MaxY > Box0MinY?
+		cmpnltps	xmm0, xmm5;			// Box1MaxY >= Box0MinY?
 
 		movups		xmm1, [edi];
-		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
+		cmpleps		xmm1, xmm4;			// Box1MinY <= Box0MaxY?
 		andps		xmm0, xmm1;
 
 		movups		xmm1, [edi + ecx];
-		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
+		cmpnltps	xmm1, xmm7;			// Box1MaxZ >= Box0MinZ?
 		andps		xmm0, xmm1;
 
 		movups		xmm1, [edi + 2*ecx];
-		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
+		cmpleps		xmm1, xmm6;			// Box1MinZ <= Box0MaxY?
 		andps		xmm0, xmm1;
 
 		add			edi, 16;			// Box1Ptr += 4
@@ -368,19 +368,19 @@ ProcessTail:
 		pcmpgtd		xmm0, xmm1;			// OutsideMask
 
 		movups		xmm1, [edi + edx];
-		cmpnleps	xmm1, xmm5;			// Box1MaxY > Box0MinY?
+		cmpnltps	xmm1, xmm5;			// Box1MaxY >= Box0MinY?
 		andnps		xmm0, xmm1;
 
 		movups		xmm1, [edi];
-		cmpltps		xmm1, xmm4;			// Box1MinY < Box0MaxY?
+		cmpleps		xmm1, xmm4;			// Box1MinY <= Box0MaxY?
 		andps		xmm0, xmm1;
 
 		movups		xmm1, [edi + ecx];
-		cmpnleps	xmm1, xmm7;			// Box1MaxZ > Box0MinZ?
+		cmpnltps	xmm1, xmm7;			// Box1MaxZ >= Box0MinZ?
 		andps		xmm0, xmm1;
 
 		movups		xmm1, [edi + 2*ecx];
-		cmpltps		xmm1, xmm6;			// Box1MinZ < Box0MaxY?
+		cmpleps		xmm1, xmm6;			// Box1MinZ <= Box0MaxY?
 		andps		xmm0, xmm1;
 
 		movmskps	eax, xmm0;
@@ -466,13 +466,13 @@ AdvanceRunningPtr:
 
 		and				edi, not 31;		// ka-chunk!
 
-		vcmpltps		ymm1, ymm5, [edi + edx];	// Box1MaxY > Box0MinY?
+		vcmpleps		ymm1, ymm5, [edi + edx];	// Box1MaxY >= Box0MinY?
 		vandps 			ymm0, ymm0, ymm1;
-		vcmpgtps		ymm1, ymm4, [edi];			// Box1MinY < Box0MaxY?
+		vcmpgeps		ymm1, ymm4, [edi];			// Box1MinY <= Box0MaxY?
 		vandps			ymm0, ymm0, ymm1;
-		vcmpltps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ > Box0MinZ?
+		vcmpleps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ >= Box0MinZ?
 		vandps			ymm0, ymm0, ymm1;
-		vcmpgtps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ < Box0MaxY?
+		vcmpgeps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ <= Box0MaxY?
 		vandps			ymm0, ymm0, ymm1;
 
 		add				edi, 32;
@@ -509,12 +509,12 @@ MainLoop:
 		cmp				ebx, [edi + 2*edx + 28];	// Box[Index1+7].mMinX <= MaxLimit?
 		jl				ProcessTail;
 
-		vcmpltps		ymm0, ymm5, [edi + edx];	// Box1MaxY > Box0MinY?
-		vcmpgtps		ymm1, ymm4, [edi];			// Box1MinY < Box0MaxY?
+		vcmpleps		ymm0, ymm5, [edi + edx];	// Box1MaxY >= Box0MinY?
+		vcmpgeps		ymm1, ymm4, [edi];			// Box1MinY <= Box0MaxY?
 		vandps			ymm0, ymm0, ymm1;
-		vcmpltps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ > Box0MinZ?
+		vcmpleps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ >= Box0MinZ?
 		vandps			ymm0, ymm0, ymm1;
-		vcmpgtps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ < Box0MaxY?
+		vcmpgeps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ <= Box0MaxY?
 		vandps			ymm0, ymm0, ymm1;
 
 		add				edi, 32;			// Box1Ptr += 8
@@ -554,13 +554,13 @@ ProcessTail:
 		vpcmpgtd		xmm1, xmm1, xmm2;
 		vinsertf128		ymm0, ymm0, xmm1, 1; // Form 256-bit OutsideMask
 
-		vcmpltps		ymm1, ymm5, [edi + edx];	// Box1MaxY > Box0MinY?
+		vcmpleps		ymm1, ymm5, [edi + edx];	// Box1MaxY >= Box0MinY?
 		vandnps			ymm0, ymm0, ymm1;
-		vcmpgtps		ymm1, ymm4, [edi];			// Box1MinY < Box0MaxY?
+		vcmpgeps		ymm1, ymm4, [edi];			// Box1MinY <= Box0MaxY?
 		vandps			ymm0, ymm0, ymm1;
-		vcmpltps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ > Box0MinZ?
+		vcmpleps		ymm1, ymm7, [edi + ecx];	// Box1MaxZ >= Box0MinZ?
 		vandps			ymm0, ymm0, ymm1;
-		vcmpgtps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ < Box0MaxY?
+		vcmpgeps		ymm1, ymm6, [edi + 2*ecx];	// Box1MinZ <= Box0MaxY?
 		vandps			ymm0, ymm0, ymm1;
 
 		vmovmskps		eax, ymm0;
