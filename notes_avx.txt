@@ -1,0 +1,27 @@
+what's the basic loop for SoA AVX look like?
+
+MainLoop:
+       cmp              edi, [esi+blah]         // p015
+       jb               Careful                 // p5
+
+       vcmpltps         ymm0, ymm4, [blah]      // p1
+       vcmpltps         ymm1, ymm5, [blah]      // p1
+       andps            ymm0, ymm1              // p5
+       vcmpgtps         ymm1, ymm6, [blah]      // p1
+       andps            ymm0, ymm1              // p5
+       vcmpgtps         ymm1, ymm7, [blah]      // p1
+       andps            ymm0, ymm1              // p5
+       vmovmskps        eax, ymm0               // p0
+       add              ecx, inc_for_8_boxes    // p015
+       test             eax, eax                // \
+       jz               MainLoop                // / fused p5
+
+total stats for 8boxes:
+- 12 p015
+  - 1 p0
+  - 4 p1
+  - 5 p5
+  - 2 wild
+- 9 p23
+
+so probably ~5 cycles/8 boxes tpt, if the cache can keep up (doubt it!)
