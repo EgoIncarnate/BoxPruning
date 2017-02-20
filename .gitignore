@@ -41,3 +41,10 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# VS junk, build results
+*.sdf
+*.suo
+Release
+Debug
+ipch
