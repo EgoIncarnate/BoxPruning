@@ -157,76 +157,17 @@ static inline udword MungeFloat(float f)
     udword toggle = (u.s >> 31) & ~(1u << 31);
     return u.s ^ toggle;
 }
-//#pragma float_control(pop)
-
-struct SIMD_AABB_X
-{
-	__forceinline	SIMD_AABB_X()	{}
-	__forceinline	~SIMD_AABB_X()	{}
-
-	void	InitFrom(const AABB& b)
-	{
-		mMinX	= MungeFloat(b.mMin.x);
-		mMaxX	= MungeFloat(b.mMax.x);
-	}
-
-    sdword mMinX;
-    sdword mMaxX;
-};
-
-struct SIMD_AABB_YZ
-{
-	__forceinline	SIMD_AABB_YZ()	{}
-	__forceinline	~SIMD_AABB_YZ()	{}
-
-	void	InitFrom(const AABB& b)
-	{
-		mMinY	= b.mMin.y;
-		mMinZ	= b.mMin.z;
-		mMaxY	= b.mMax.y;
-		mMaxZ	= b.mMax.z;
-	}
-
-    float mMinY;
-    float mMinZ;
-    float mMaxY;
-    float mMaxZ;
-};
-
-/*static __forceinline int intersects2D(const SIMD_AABB_YZ& a, const SIMD_AABB_YZ& b)
-{
-       if(    b.mMaxY <= a.mMinY || a.mMaxY < b.mMinY
-       ||     b.mMaxZ <= a.mMinZ || a.mMaxZ < b.mMinZ)
-              return 0;
-       return 1;
-}*/
 
 	#include <xmmintrin.h>
 	#include <emmintrin.h>
 
-/*#define SIMD_OVERLAP_INIT(box)	\
-       const __m128 b = _mm_shuffle_ps(_mm_load_ps(&box.mMinY), _mm_load_ps(&box.mMinY), 78);
-
-#define SIMD_OVERLAP_TEST(box)						\
-       const __m128 a = _mm_load_ps(&box.mMinY);	\
-       const __m128 d = _mm_cmpgt_ps(a, b);			\
-       if(_mm_movemask_ps(d)==12)*/
-
-static void __cdecl outputPair(udword id0, udword id1, Container& pairs, const udword* remap)
+static inline __m128i MungeFloatSSE(__m128 f)
 {
-	pairs.Add(remap[id0]).Add(remap[id1]);
+	f = _mm_add_ps(f, _mm_setzero_ps()); // adding 0 canonicalizes -0.0f to +0.0f
+	__m128i sign = _mm_srai_epi32(_mm_castps_si128(f), 31);
+	__m128i toggle = _mm_and_si128(sign, _mm_set1_epi32(0x7fffffff));
+	return _mm_xor_si128(_mm_castps_si128(f), toggle);
 }
-
-static void __cdecl outputPair2(udword id0, udword id1, Container& pairs)
-{
-	pairs.Add(id0).Add(id1);
-}
-
-/*static void debug(udword id0, udword id1, Container& pairs, const udword* remap)
-{
-	if(id0==9 && remap[id1]==6)
-		int FoundIt=0;
-}*/
 
 // Count trailing zeroes
 static inline udword Ctz32(udword x)
@@ -682,7 +623,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	FloatOrInt32* BoxEnd = BoxBase + nb;
 
 	udword* Remap;
-	//{
+	{
 		// Allocate some temporary data
 		float* PosList = new float[nb+1];
 
@@ -696,7 +637,39 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 		Remap = RS.Sort(PosList, nb+1).GetRanks();
 
 		// 3) Prepare the SoA box array
-		for(udword i=0;i<nb;i++)
+		udword i;
+		for(i=0;i<(nb & ~3);i += 4)
+		{
+			const AABB& Box0 = list[Remap[i+0]];
+			const AABB& Box1 = list[Remap[i+1]];
+			const AABB& Box2 = list[Remap[i+2]];
+			const AABB& Box3 = list[Remap[i+3]];
+			FloatOrInt32 *OutBoxI = &BoxBase[i];
+			__m128 r0,r1,r2,r3;
+			__m128i i0,i1;
+
+			r0 = _mm_loadu_ps(&Box0.mMin.x);
+			r1 = _mm_loadu_ps(&Box1.mMin.x);
+			r2 = _mm_loadu_ps(&Box2.mMin.x);
+			r3 = _mm_loadu_ps(&Box3.mMin.x);
+			_MM_TRANSPOSE4_PS(r0,r1,r2,r3); // r0 = MinX, r1 = MinY, r2 = MinZ, r3 = MaxX
+
+			i0 = MungeFloatSSE(r0); // munged MinX
+			i1 = MungeFloatSSE(r3); // munged MaxX
+			_mm_store_si128((__m128i *) &PtrAddBytes(OutBoxI, 2*BoxBytesN)->s, i0); // MinX
+			_mm_store_si128((__m128i *) &PtrAddBytes(OutBoxI,  BoxBytes3N)->s, i1); // MaxX
+			_mm_store_ps(&PtrAddBytes(OutBoxI, 0*BoxBytesP)->f, r1); // MinY
+			_mm_store_ps(&PtrAddBytes(OutBoxI, 2*BoxBytesP)->f, r2); // MinZ
+
+			r0 = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i *)&Box0.mMax.y));
+			r1 = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i *)&Box1.mMax.y));
+			r2 = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i *)&Box2.mMax.y));
+			r3 = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i *)&Box3.mMax.y));
+			_MM_TRANSPOSE4_PS(r0,r1,r2,r3); // r0 = MaxY, r1=MaxZ
+			_mm_store_ps(&PtrAddBytes(OutBoxI, 1*BoxBytesN)->f, r0); // MaxY
+			_mm_store_ps(&PtrAddBytes(OutBoxI, 1*BoxBytesP)->f, r1); // MaxZ
+		}
+		for(;i<nb;i++)
 		{
 			const AABB& Box = list[Remap[i]];
 			FloatOrInt32 *OutBoxI = &BoxBase[i];
@@ -707,7 +680,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 			PtrAddBytes(OutBoxI, 1*BoxBytesP)->f = Box.mMax.z;
 			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = Box.mMin.z;
 		}
-		for(udword i=nb;i<nbpad;i++)
+		for(;i<nbpad;i++)
 		{
 			FloatOrInt32 *OutBoxI = &BoxBase[i];
 			PtrAddBytes(OutBoxI,  BoxBytes3N)->s = -0x80000000;
@@ -718,7 +691,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 			PtrAddBytes(OutBoxI, 2*BoxBytesP)->f = FLT_MAX;
 		}
 		DELETEARRAY(PosList);
-	//}
+	}
 
 	// 4) Prune the list
 #if 0
