@@ -232,12 +232,12 @@ static void BoxPruningKernelIntrinsics(Container &pairs, FloatOrInt32* BoxBase, 
 			Box1Ptr += 4;
 
 			// Intersection test:
-			//  !(b.MaxY <= a.MinY) && (b.MinY < a.MaxY) && !(b.MaxZ <= a.MinZ) && (b.MinZ <= a.MaxZ)
+			//  !(b.MaxY < a.MinY) && (b.MinY <= a.MaxY) && !(b.MaxZ < a.MinZ) && (b.MinZ <= a.MaxZ)
 			__m128 Cmp;
-			Cmp = _mm_cmpnle_ps(Box1MaxY, Box0MinY);
-			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinY, Box0MaxY));
-			Cmp = _mm_and_ps(Cmp, _mm_cmpnle_ps(Box1MaxZ, Box0MinZ));
-			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinZ, Box0MaxZ));
+			Cmp = _mm_cmpnlt_ps(Box1MaxY, Box0MinY);
+			Cmp = _mm_and_ps(Cmp, _mm_cmple_ps(Box1MinY, Box0MaxY));
+			Cmp = _mm_and_ps(Cmp, _mm_cmpnlt_ps(Box1MaxZ, Box0MinZ));
+			Cmp = _mm_and_ps(Cmp, _mm_cmple_ps(Box1MinZ, Box0MaxZ));
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
@@ -257,12 +257,12 @@ static void BoxPruningKernelIntrinsics(Container &pairs, FloatOrInt32* BoxBase, 
 			__m128 Box1MinZ = _mm_loadu_ps(&PtrAddBytes(Box1Ptr, 2*BoxBytesP)->f);
 
 			// Intersection test:
-			//  !(b.MaxY <= a.MinY) && (b.MinY < a.MaxY) && !(b.MaxZ <= a.MinZ) && (b.MinZ <= a.MaxZ)
+			//  !(b.MaxY < a.MinY) && (b.MinY <= a.MaxY) && !(b.MaxZ < a.MinZ) && (b.MinZ <= a.MaxZ)
 			__m128 Cmp;
-			Cmp = _mm_andnot_ps(OutsideMask, _mm_cmpnle_ps(Box1MaxY, Box0MinY));
-			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinY, Box0MaxY));
-			Cmp = _mm_and_ps(Cmp, _mm_cmpnle_ps(Box1MaxZ, Box0MinZ));
-			Cmp = _mm_and_ps(Cmp, _mm_cmplt_ps(Box1MinZ, Box0MaxZ));
+			Cmp = _mm_andnot_ps(OutsideMask, _mm_cmpnlt_ps(Box1MaxY, Box0MinY));
+			Cmp = _mm_and_ps(Cmp, _mm_cmple_ps(Box1MinY, Box0MaxY));
+			Cmp = _mm_and_ps(Cmp, _mm_cmpnlt_ps(Box1MaxZ, Box0MinZ));
+			Cmp = _mm_and_ps(Cmp, _mm_cmple_ps(Box1MinZ, Box0MaxZ));
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
