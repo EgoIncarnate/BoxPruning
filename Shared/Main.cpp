@@ -26,7 +26,7 @@ static bool BruteForceCompleteBoxTest(udword nb, const AABB** list, std::vector<
 }
 #endif
 
-static void RunPerformanceTest()
+static void RunPerformanceTest(bool ProfilingMode)
 {
 	const udword NbBoxes = 10000;
 
@@ -96,7 +96,7 @@ static void RunPerformanceTest()
 //	Pairs.Reset();
 #endif
 	const udword NBbrute = 1;
-	const udword NB = 512;
+	const udword NB = ProfilingMode ? 1024 : 20;
 
 	// Test "complete" pruning
 	if(1)
@@ -104,7 +104,7 @@ static void RunPerformanceTest()
 		udword MinTime = 0xffffffff;
 		udword Time;
 
-		if(1)
+		if(!ProfilingMode)
 		{
 			// Brute-force
 			for(udword i=0;i<NBbrute;i++)
@@ -153,7 +153,8 @@ static void RunPerformanceTest()
 			EndProfile(Time);
 			if(Time<MinTime)
 				MinTime = Time;
-			printf(" %d K-cycles.\n", Time/1024);
+			if (!ProfilingMode)
+				printf(" %d K-cycles.\n", Time/1024);
 		}
 #ifdef USE_STL
 		printf("Complete test (box pruning): found %d intersections in %d K-cycles.\n", Pairs.size()>>1, MinTime/1024);
@@ -531,8 +532,11 @@ static void RunValidityTest()
 
 int main(int argc, char* argv[])
 {
-	RunPerformanceTest();
-	RunValidityTest();
+	bool ProfilingMode = false;
+
+	RunPerformanceTest(ProfilingMode);
+	if (!ProfilingMode)
+		RunValidityTest();
 //	RunEdgeCase();
 
 	//while(!_kbhit());
