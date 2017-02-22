@@ -340,6 +340,27 @@ static void BoxPruningKernelSSE2(PairOutputBuffer &POB, FloatOrInt32* BoxBase, F
 	static const udword PreAlignMasks[8] = {
 		 0u,  0u,  0u,  0u, ~0u, ~0u, ~0u, ~0u,
 	};
+	static const __declspec(align(16)) sdword MoveMasks[16][8] = {
+		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 0
+		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 1
+		{ -1, 0, 0, 0, 0, 0, 0, 0 }, // 2
+		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 3
+		{  0, 0, 0, 0,-1, 0, 0, 0 }, // 4
+		{  0,-1, 0, 0, 0, 0, 0, 0 }, // 5
+		{ -1,-1, 0, 0, 0, 0, 0, 0 }, // 6
+		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 7
+		{  0, 0,-1, 0,-1, 0, 0, 0 }, // 8
+		{  0, 0, 0, 0, 0,-1, 0, 0 }, // 9
+		{ -1, 0, 0, 0, 0,-1, 0, 0 }, // 10
+		{  0, 0,-1, 0, 0, 0, 0, 0 }, // 11
+		{  0, 0, 0, 0,-1,-1, 0, 0 }, // 12
+		{  0,-1,-1, 0, 0, 0, 0, 0 }, // 13
+		{ -1,-1,-1, 0, 0, 0, 0, 0 }, // 14
+		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 15
+	};
+	static const udword PopCount8[16] = {
+		0, 8, 8,16,  8,16,16,24,  8,16,16,24, 16,24,24,32
+	};
 
 	__asm
 	{
@@ -438,25 +459,56 @@ FoundIntersections:
 		push		ecx;
 		push		edx;
 
-			push		eax;			// "mask" arg for ReportIntersections
-			lea			eax, [edi - 16];
-			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 4 - BoxBase]
-			push		eax;			// "remap_base" arg
-			mov			eax, [BoxToRemap];
-			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[POB];			// "POB" arg
-			call		ReportIntersections;
+			mov			ecx, [POB];
+			mov			edx, [ecx]PairOutputBuffer.mEnd;
+			cmp			edx, [ecx]PairOutputBuffer.mHighWatermark;
+			jbe			NoGrowNecessary
+
+			push		eax;
+			push		ecx;			// POB arg
+			call		GrowPairOutputBuffer;
+			pop			eax;
+			mov			ecx, [POB];
+			mov			edx, [ecx]PairOutputBuffer.mEnd;
+			mov			ecx, [esp];			// =pushed edx (from before)
+			movss		xmm4, [esi + ecx];	// xmm4 = Box0MaxY
+			shufps		xmm4, xmm4, 0;
+			movss		xmm5, [esi];		// xmm5 = Box0MinY
+			shufps		xmm5, xmm5, 0;
+			neg			ecx;
+			movss		xmm6, [esi + ecx];	// xmm6 = Box0MaxZ
+			shufps		xmm6, xmm6, 0;
+			movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
+			shufps		xmm7, xmm7, 0;
+
+NoGrowNecessary:
+			mov			ecx, [BoxToRemap];
+			movd 		xmm0, [ecx + esi];		// remapped id0
+			pshufd		xmm0, xmm0, 0;			// broadcast it
+			movdqu		xmm1, [ecx + edi - 16];	// remapped potential id1s
+			mov			ecx, PopCount8[eax*4];
+			shl			eax, 5;					// mask -> table offset
+			pshufd		xmm2, xmm1, 0f9h;		// move everything by 1 lane
+			movdqa		xmm3, MoveMasks[eax];
+			pand		xmm2, xmm3;				// and select via mask
+			pandn		xmm3, xmm1;
+			por			xmm2, xmm3;
+			pshufd		xmm1, xmm2, 0feh;		// move everything by 2 lanes
+			movdqa		xmm3, MoveMasks[eax + 16];
+			pand		xmm1, xmm3;				// and select via mask
+			pandn		xmm3, xmm2;
+			por			xmm1, xmm3;
+			movdqa		xmm2, xmm0;
+			punpckldq	xmm0, xmm1;				// interleave with id0
+			punpckhdq	xmm2, xmm1;
+			movdqu		[edx], xmm0;
+			movdqu		[edx + 16], xmm2;
+			add			edx, ecx;
+			mov			ecx, [POB];
+			mov			[ecx]PairOutputBuffer.mEnd, edx;
 
 		pop			edx;
 		pop			ecx;
-		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
-		shufps		xmm4, xmm4, 0;
-		movss		xmm5, [esi];		// xmm5 = Box0MinY
-		shufps		xmm5, xmm5, 0;
-		movss		xmm6, [esi + ecx];	// xmm6 = Box0MaxZ
-		shufps		xmm6, xmm6, 0;
-		movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
-		shufps		xmm7, xmm7, 0;
 		jmp			MainLoop;
 
 		align		16
@@ -640,10 +692,16 @@ FoundIntersections:
 			pop				eax;
 			mov				ecx, [POB];
 			mov				edx, [ecx]PairOutputBuffer.mEnd;
+			mov				ecx, [esp];			// =pushed edx (from before)
+			vbroadcastss	ymm4, [esi + ecx];	// ymm4 = Box0MaxY
+			vbroadcastss	ymm5, [esi];		// ymm5 = Box0MinY
+			neg				ecx;
+			vbroadcastss	ymm6, [esi + ecx];	// ymm6 = Box0MaxZ
+			vbroadcastss	ymm7, [esi + 2*ecx]; // ymm7 = Box0MinZ
 
 NoGrowNecessary:
 			mov				ecx, [BoxToRemap];
-			vbroadcastss	xmm4, [ecx + esi];		// remapped id0
+			vbroadcastss	xmm2, [ecx + esi];		// remapped id0
 			vmovdqu			xmm1, [ecx + edi - 32];	// remapped potential id1, low half
 			vmovdqu			xmm3, [ecx + edi - 16]; // remapped potential id1, high half
 			mov				ecx, 00fh;				// low mask ID
@@ -652,15 +710,15 @@ NoGrowNecessary:
 			and				eax, 0f0h;				// high mask offset
 			vpshufb			xmm1, xmm1, CompactMasks[ecx]; // compact output dwords, low half
 			vpshufb			xmm3, xmm3, CompactMasks[eax]; // compact output dwords, high half
-			vpunpckldq		xmm0, xmm4, xmm1;		// interleave with id0
-			vpunpckhdq		xmm1, xmm4, xmm1;
-			vpunpckldq		xmm2, xmm4, xmm3;
-			vpunpckhdq		xmm3, xmm4, xmm3;
+			vpunpckldq		xmm0, xmm2, xmm1;		// interleave with id0
+			vpunpckhdq		xmm1, xmm2, xmm1;
 			vmovdqu			[edx + 0], xmm0;
 			vmovdqu			[edx + 16], xmm1;
 			popcnt			ecx, ecx;
-			vmovdqu			[edx + ecx*8 + 0], xmm2;
-			vmovdqu			[edx + ecx*8 + 16], xmm3;
+			vpunpckldq		xmm0, xmm2, xmm3;
+			vpunpckhdq		xmm1, xmm2, xmm3;
+			vmovdqu			[edx + ecx*8 + 0], xmm0;
+			vmovdqu			[edx + ecx*8 + 16], xmm1;
 			popcnt			eax, eax;
 			add				eax, ecx;
 			lea				edx, [edx + eax*8];
@@ -669,10 +727,6 @@ NoGrowNecessary:
 
 		pop				edx;
 		pop				ecx;
-		vbroadcastss	ymm4, [esi + edx];	// ymm4 = Box0MaxY
-		vbroadcastss	ymm5, [esi];		// ymm5 = Box0MinY
-		vbroadcastss	ymm6, [esi + ecx];	// ymm6 = Box0MaxZ
-		vbroadcastss	ymm7, [esi + 2*ecx]; // ymm7 = Box0MinZ
 		jmp				MainLoop;
 
 		align			16
