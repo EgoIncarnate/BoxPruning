@@ -337,6 +337,9 @@ static void BoxPruningKernelSSE2(PairOutputBuffer &POB, FloatOrInt32* BoxBase, F
 {
 	FloatOrInt32 *RunningPtr = BoxBase;
 	udword BoxToRemap;
+	static const udword PreAlignMasks[8] = {
+		 0u,  0u,  0u,  0u, ~0u, ~0u, ~0u, ~0u,
+	};
 
 	__asm
 	{
@@ -364,8 +367,6 @@ AdvanceRunningPtr:
 		lea			ebx, [esi + 2*edx];
 		mov			ebx, [ebx + edx];	// MaxLimit
 
-
-ReloadBeforeMainLoop:
 		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
 		shufps		xmm4, xmm4, 0;
 		movss		xmm5, [esi];		// xmm5 = Box0MinY
@@ -375,23 +376,56 @@ ReloadBeforeMainLoop:
 		movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
 		shufps		xmm7, xmm7, 0;
 
+		// First iter tries to get us to alignment
+		// Don't even bother trying if there's only a handful candidates for this box
+		cmp			ebx, [edi + 2*edx + 12];	// Box[Index1+3].mMinX <= MaxLimit?
+		jl			ProcessTail;
+
+		mov			eax, edi;
+		and			eax, 15;			// address mod 16
+		neg			eax;
+		movups		xmm0, [PreAlignMasks + 16 + eax];
+
+		and			edi, not 15;		// ka-chunk!
+
+		movaps		xmm1, [edi + edx];
+		cmpnltps	xmm1, xmm5;			// Box1MaxY >= Box0MinY?
+		andps		xmm0, xmm1;
+
+		movaps		xmm1, [edi];
+		cmpleps		xmm1, xmm4;			// Box1MinY <= Box0MaxY?
+		andps		xmm0, xmm1;
+
+		movaps		xmm1, [edi + ecx];
+		cmpnltps	xmm1, xmm7;			// Box1MaxZ >= Box0MinZ?
+		andps		xmm0, xmm1;
+
+		movaps		xmm1, [edi + 2*ecx];
+		cmpleps		xmm1, xmm6;			// Box1MinZ <= Box0MaxY?
+		andps		xmm0, xmm1;
+
+		add			edi, 16;			// Box1Ptr += 4
+		movmskps	eax, xmm0;
+		test		eax, eax;
+		jnz			FoundIntersections;
+
 		align		16
 MainLoop:
 		cmp			ebx, [edi + 2*edx + 12];	// Box[Index1+3].mMinX <= MaxLimit?
 		jl			ProcessTail;
 
-		movups		xmm0, [edi + edx];
+		movaps		xmm0, [edi + edx];
 		cmpnltps	xmm0, xmm5;			// Box1MaxY >= Box0MinY?
 
-		movups		xmm1, [edi];
+		movaps		xmm1, [edi];
 		cmpleps		xmm1, xmm4;			// Box1MinY <= Box0MaxY?
 		andps		xmm0, xmm1;
 
-		movups		xmm1, [edi + ecx];
+		movaps		xmm1, [edi + ecx];
 		cmpnltps	xmm1, xmm7;			// Box1MaxZ >= Box0MinZ?
 		andps		xmm0, xmm1;
 
-		movups		xmm1, [edi + 2*ecx];
+		movaps		xmm1, [edi + 2*ecx];
 		cmpleps		xmm1, xmm6;			// Box1MinZ <= Box0MaxY?
 		andps		xmm0, xmm1;
 
@@ -400,6 +434,7 @@ MainLoop:
 		test		eax, eax;
 		jz			MainLoop;
 
+FoundIntersections:
 		push		ecx;
 		push		edx;
 
@@ -414,7 +449,15 @@ MainLoop:
 
 		pop			edx;
 		pop			ecx;
-		jmp			ReloadBeforeMainLoop;
+		movss		xmm4, [esi + edx];	// xmm4 = Box0MaxY
+		shufps		xmm4, xmm4, 0;
+		movss		xmm5, [esi];		// xmm5 = Box0MinY
+		shufps		xmm5, xmm5, 0;
+		movss		xmm6, [esi + ecx];	// xmm6 = Box0MaxZ
+		shufps		xmm6, xmm6, 0;
+		movss		xmm7, [esi + 2*ecx];// xmm7 = Box0MinZ
+		shufps		xmm7, xmm7, 0;
+		jmp			MainLoop;
 
 		align		16
 ProcessTail:
@@ -561,14 +604,7 @@ AdvanceRunningPtr:
 		add				edi, 32;
 		vmovmskps		eax, ymm0;
 		test			eax, eax;
-		jz				MainLoop;
-		jmp				FoundIntersections;
-
-ReloadBeforeMainLoop:
-		vbroadcastss	ymm4, [esi + edx];	// ymm4 = Box0MaxY
-		vbroadcastss	ymm5, [esi];		// ymm5 = Box0MinY
-		vbroadcastss	ymm6, [esi + ecx];	// ymm6 = Box0MaxZ
-		vbroadcastss	ymm7, [esi + 2*ecx]; // ymm7 = Box0MinZ
+		jnz				FoundIntersections;
 
 		align			16
 MainLoop:
@@ -633,7 +669,11 @@ NoGrowNecessary:
 
 		pop				edx;
 		pop				ecx;
-		jmp				ReloadBeforeMainLoop;
+		vbroadcastss	ymm4, [esi + edx];	// ymm4 = Box0MaxY
+		vbroadcastss	ymm5, [esi];		// ymm5 = Box0MinY
+		vbroadcastss	ymm6, [esi + ecx];	// ymm6 = Box0MaxZ
+		vbroadcastss	ymm7, [esi + 2*ecx]; // ymm7 = Box0MinZ
+		jmp				MainLoop;
 
 		align			16
 ProcessTail:
