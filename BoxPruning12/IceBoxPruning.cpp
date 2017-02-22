@@ -172,6 +172,9 @@ static inline __m128i MungeFloatSSE(__m128 f)
 // Pair output buffer. We use this instead of a Container because we want slightly different
 // insertion semantics. No real abstraction in here; seeing as the whole point of this is to
 // (eventually) poke around in these fields from ASM code, it seems pointless.
+//
+// While the PairOutputBuffer is active, it takes over management of the storage for the
+// underlying Container. On destruction, it returns the storage back to the container.
 struct PairOutputBuffer
 {
 	static const size_t kSlack = 16; // distance from the high watermark to the actual capacity
@@ -179,30 +182,41 @@ struct PairOutputBuffer
 	udword*	mEnd;			// Pointer to current end (just past last inserted element)
 	udword* mHighWatermark;	// Pointer to kSlack elements before the end of the allocated storage
 	udword* mBegin;			// Pointer to beginning of storage
+	Container &mHost;		// The container we're outputting to.
 
-	PairOutputBuffer();
+	PairOutputBuffer(Container &host);
 	~PairOutputBuffer();
-
-	size_t GetNbEntries() const		{ return mEnd - mBegin; }
 };
 
-PairOutputBuffer::PairOutputBuffer()
+PairOutputBuffer::PairOutputBuffer(Container &host)
+	: mHost(host)
 {
-	mBegin = (udword *)malloc(kSlack * 2 * sizeof(*mBegin));
-	mEnd = mBegin;
-	mHighWatermark = mBegin + kSlack;
+	if (mHost.GetCapacity() < kSlack)
+		mHost.Resize(kSlack);
+
+	mBegin = host.GetEntries() + host.GetNbEntries();
+	mEnd = mBegin + host.GetNbEntries();
+	mHighWatermark = mBegin + host.GetCapacity() - kSlack;
 }
 
 PairOutputBuffer::~PairOutputBuffer()
 {
-	free(mBegin);
+	// Return storage back to the container.
+	mHost.mEntries = mBegin;
+	mHost.mCurNbEntries = mEnd - mBegin;
+	mHost.mMaxNbEntries = (mHighWatermark + kSlack) - mBegin;
 }
 
 static __declspec(noinline) void GrowPairOutputBuffer(PairOutputBuffer &buf)
 {
-	size_t numEntries = buf.GetNbEntries();
+	size_t numEntries = buf.mEnd - buf.mBegin;
 	size_t newCapacity = numEntries * 2 + 2*PairOutputBuffer::kSlack;
-	buf.mBegin = (udword *)realloc(buf.mBegin, newCapacity*sizeof(*buf.mBegin));
+
+	udword* NewEntries = new udword[newCapacity];
+	CopyMemory(NewEntries, buf.mBegin, numEntries*sizeof(udword));
+	DELETEARRAY(buf.mBegin);
+
+	buf.mBegin = NewEntries;
 	buf.mEnd = buf.mBegin + numEntries;
 	buf.mHighWatermark = buf.mBegin + newCapacity - PairOutputBuffer::kSlack;
 }
@@ -224,12 +238,12 @@ static void __cdecl ReportIntersections(PairOutputBuffer& POB, udword remap_id0,
 
 	udword *Pairs = POB.mEnd;
 
-	while (mask)
+	do
 	{
 		*Pairs++ = remap_id0;
 		*Pairs++ = remap_base[Ctz32(mask)];
 		mask &= mask - 1;
-	}
+	} while (mask);
 
 	POB.mEnd = Pairs;
 }
@@ -663,7 +677,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	ptrdiff_t BoxBytes3N = 3*BoxBytesN;
 
 	// Our pair output buffer
-	PairOutputBuffer POB;
+	PairOutputBuffer POB(pairs);
 
 	// BoxSOA: in order, arrays for MaxX,MinX (int), MaxY,MinY,MaxZ,MinZ (float).
 	FloatOrInt32* BoxSOA = (FloatOrInt32*)_aligned_malloc(BoxBytesP * 6, 32);
@@ -758,7 +772,6 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 #endif
 
 	_aligned_free(BoxSOA);
-	pairs.Add(POB.mBegin, POB.GetNbEntries());
 	return true;
 }
 
