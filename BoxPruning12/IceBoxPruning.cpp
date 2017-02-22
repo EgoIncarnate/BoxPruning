@@ -207,7 +207,7 @@ PairOutputBuffer::~PairOutputBuffer()
 	mHost.mMaxNbEntries = (mHighWatermark + kSlack) - mBegin;
 }
 
-static void __cdecl GrowPairOutputBuffer(PairOutputBuffer &buf)
+static void __stdcall GrowPairOutputBuffer(PairOutputBuffer &buf)
 {
 	size_t numEntries = buf.mEnd - buf.mBegin;
 	size_t newCapacity = numEntries * 2 + 2*PairOutputBuffer::kSlack;
@@ -473,6 +473,30 @@ AllDone:
 
 static void BoxPruningKernelAVX(PairOutputBuffer &POB, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
 {
+	static const udword kWord0 = 0x03020100;
+	static const udword kWord1 = 0x07060504;
+	static const udword kWord2 = 0x0b0a0908;
+	static const udword kWord3 = 0x0f0e0d0c;
+	static const udword kNone  = 0x80808080;
+	static const __declspec(align(16)) udword CompactMasks[16*4] = {
+		kNone,  kNone,  kNone,  kNone,		// 0000
+		kWord0, kNone,  kNone,  kNone,		// 0001
+		kWord1, kNone,  kNone,  kNone,		// 0010
+		kWord0, kWord1, kNone,  kNone,		// 0011
+		kWord2, kNone,  kNone,  kNone,		// 0100
+		kWord0, kWord2, kNone,  kNone,		// 0101
+		kWord1, kWord2, kNone,  kNone,		// 0110
+		kWord0, kWord1, kWord2, kNone,		// 0111
+		kWord3, kNone,  kNone,  kNone,		// 1000
+		kWord0, kWord3, kNone,  kNone,		// 1001
+		kWord1, kWord3, kNone,  kNone,		// 1010
+		kWord0, kWord1, kWord3, kNone,		// 1011
+		kWord2, kWord3, kNone,  kNone,		// 1100
+		kWord0, kWord2, kWord3, kNone,		// 1101
+		kWord1, kWord2, kWord3, kNone,		// 1110
+		kWord0, kWord1, kWord2, kWord3,		// 1111
+	};
+
 	static const udword PreAlignMasks[16] = {
 		 0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
 		~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u,
@@ -538,23 +562,7 @@ AdvanceRunningPtr:
 		vmovmskps		eax, ymm0;
 		test			eax, eax;
 		jz				MainLoop;
-
-		push			ecx;
-		push			edx;
-		vzeroupper;
-
-			push		eax;			// "mask" arg for ReportIntersections
-			lea			eax, [edi - 32];
-			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 8 - BoxBase]
-			push		eax;			// "remap_base" arg
-			mov			eax, [BoxToRemap];
-			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[POB];			// "POB" arg
-			call		ReportIntersections;
-
-		pop				edx;
-		pop				ecx;
-		jmp				ReloadBeforeMainLoop;
+		jmp				FoundIntersections;
 
 ReloadBeforeMainLoop:
 		vbroadcastss	ymm4, [esi + edx];	// ymm4 = Box0MaxY
@@ -580,18 +588,50 @@ MainLoop:
 		test			eax, eax;
 		jz				MainLoop;
 
+FoundIntersections:
 		push			ecx;
 		push			edx;
-		vzeroupper;
 
-			push		eax;			// "mask" arg for ReportIntersections
-			lea			eax, [edi - 32];
-			add			eax, [BoxToRemap]; // &Remap[Box1Ptr - 8 - BoxBase]
-			push		eax;			// "remap_base" arg
-			mov			eax, [BoxToRemap];
-			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[POB];			// "POB" arg
-			call		ReportIntersections;
+			mov				ecx, [POB];
+			mov				edx, [ecx]PairOutputBuffer.mEnd;
+			cmp				edx, [ecx]PairOutputBuffer.mHighWatermark;
+			jbe				NoGrowNecessary
+
+			vzeroupper;
+			push			eax;
+			push			ecx;			// POB arg
+			call			GrowPairOutputBuffer;
+			pop				eax;
+			mov				ecx, [POB];
+			mov				edx, [ecx]PairOutputBuffer.mEnd;
+
+NoGrowNecessary:
+			mov				ecx, [BoxToRemap];
+			vbroadcastss	xmm4, [ecx + esi];		// remapped id0
+			vmovdqu			xmm1, [ecx + edi - 32];	// remapped potential id1, low half
+			vmovdqu			xmm3, [ecx + edi - 16]; // remapped potential id1, high half
+			mov				ecx, 00fh;				// low mask ID
+			and				ecx, eax;
+			shl				ecx, 4;					// low mask offset
+			and				eax, 0f0h;				// high mask offset
+			vpshufb			xmm1, xmm1, CompactMasks[ecx]; // compact output dwords, low half
+			vpshufb			xmm3, xmm3, CompactMasks[eax]; // compact output dwords, high half
+			vpunpckldq		xmm0, xmm4, xmm1;		// interleave with id0
+			vpunpckhdq		xmm1, xmm4, xmm1;
+			vpunpckldq		xmm2, xmm4, xmm3;
+			vpunpckhdq		xmm3, xmm4, xmm3;
+			vmovdqu			[edx + 0], xmm0;
+			vmovdqu			[edx + 16], xmm1;
+			popcnt			ecx, ecx;
+			shl				ecx, 3;
+			add				edx, ecx;
+			vmovdqu			[edx + 0], xmm2;
+			vmovdqu			[edx + 16], xmm3;
+			popcnt			eax, eax;
+			shl				eax, 3;
+			add				edx, eax;
+			mov				ecx, [POB];
+			mov				[ecx]PairOutputBuffer.mEnd, edx;
 
 		pop				edx;
 		pop				ecx;
