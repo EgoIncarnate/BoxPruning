@@ -419,7 +419,7 @@ MainLoop:
 
 		movaps		xmm1, [edi];
 		cmpleps		xmm1, xmm4;			// Box1MinY <= Box0MaxY?
-		andps		xmm0, xmm1;
+		pand		xmm0, xmm1;			// The math says this loop needs *exactly* one andps replaced by pand. The math is right. :)
 
 		movaps		xmm1, [edi + ecx];
 		cmpnltps	xmm1, xmm7;			// Box1MaxZ >= Box0MinZ?
