@@ -623,13 +623,11 @@ NoGrowNecessary:
 			vmovdqu			[edx + 0], xmm0;
 			vmovdqu			[edx + 16], xmm1;
 			popcnt			ecx, ecx;
-			shl				ecx, 3;
-			add				edx, ecx;
-			vmovdqu			[edx + 0], xmm2;
-			vmovdqu			[edx + 16], xmm3;
+			vmovdqu			[edx + ecx*8 + 0], xmm2;
+			vmovdqu			[edx + ecx*8 + 16], xmm3;
 			popcnt			eax, eax;
-			shl				eax, 3;
-			add				edx, eax;
+			add				eax, ecx;
+			lea				edx, [edx + eax*8];
 			mov				ecx, [POB];
 			mov				[ecx]PairOutputBuffer.mEnd, edx;
 
