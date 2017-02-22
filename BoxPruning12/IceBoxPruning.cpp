@@ -169,6 +169,44 @@ static inline __m128i MungeFloatSSE(__m128 f)
 	return _mm_xor_si128(_mm_castps_si128(f), toggle);
 }
 
+// Pair output buffer. We use this instead of a Container because we want slightly different
+// insertion semantics. No real abstraction in here; seeing as the whole point of this is to
+// (eventually) poke around in these fields from ASM code, it seems pointless.
+struct PairOutputBuffer
+{
+	static const size_t kSlack = 16; // distance from the high watermark to the actual capacity
+
+	udword*	mEnd;			// Pointer to current end (just past last inserted element)
+	udword* mHighWatermark;	// Pointer to kSlack elements before the end of the allocated storage
+	udword* mBegin;			// Pointer to beginning of storage
+
+	PairOutputBuffer();
+	~PairOutputBuffer();
+
+	size_t GetNbEntries() const		{ return mEnd - mBegin; }
+};
+
+PairOutputBuffer::PairOutputBuffer()
+{
+	mBegin = (udword *)malloc(kSlack * 2 * sizeof(*mBegin));
+	mEnd = mBegin;
+	mHighWatermark = mBegin + kSlack;
+}
+
+PairOutputBuffer::~PairOutputBuffer()
+{
+	free(mBegin);
+}
+
+static __declspec(noinline) void GrowPairOutputBuffer(PairOutputBuffer &buf)
+{
+	size_t numEntries = buf.GetNbEntries();
+	size_t newCapacity = numEntries * 2 + 2*PairOutputBuffer::kSlack;
+	buf.mBegin = (udword *)realloc(buf.mBegin, newCapacity*sizeof(*buf.mBegin));
+	buf.mEnd = buf.mBegin + numEntries;
+	buf.mHighWatermark = buf.mBegin + newCapacity - PairOutputBuffer::kSlack;
+}
+
 // Count trailing zeroes
 static inline udword Ctz32(udword x)
 {
@@ -178,13 +216,22 @@ static inline udword Ctz32(udword x)
 }
 
 // Reports a bunch of intersections as specified by a base index and a bit mask.
-static void __cdecl ReportIntersections(Container& pairs, udword remap_id0, const udword* remap_base, udword mask)
+static void __cdecl ReportIntersections(PairOutputBuffer& POB, udword remap_id0, const udword* remap_base, udword mask)
 {
+	// Make sure there's enough space to insert our new elements
+	if (POB.mEnd > POB.mHighWatermark)
+		GrowPairOutputBuffer(POB);
+
+	udword *Pairs = POB.mEnd;
+
 	while (mask)
 	{
-		pairs.Add(remap_id0).Add(remap_base[Ctz32(mask)]);
+		*Pairs++ = remap_id0;
+		*Pairs++ = remap_base[Ctz32(mask)];
 		mask &= mask - 1;
 	}
+
+	POB.mEnd = Pairs;
 }
 
 static void Error()
@@ -198,7 +245,7 @@ static inline T* PtrAddBytes(T* ptr, ptrdiff_t bytes)
 	return (T*)((char*)ptr + bytes);
 }
 
-static void BoxPruningKernelIntrinsics(Container &pairs, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
+static void BoxPruningKernelIntrinsics(PairOutputBuffer &POB, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
 {
 	ptrdiff_t BoxBytesN = -BoxBytesP;
 	FloatOrInt32 *Box0Ptr = BoxBase; // corresponds to Index0
@@ -241,7 +288,7 @@ static void BoxPruningKernelIntrinsics(Container &pairs, FloatOrInt32* BoxBase, 
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
-				ReportIntersections(pairs, RIndex0, Remap + ((Box1Ptr - 4) - BoxBase), Mask);
+				ReportIntersections(POB, RIndex0, Remap + ((Box1Ptr - 4) - BoxBase), Mask);
 		}
 
 		// Tail group: first box is in, but one or more boxes with mMinX past MaxLimit inside.
@@ -266,13 +313,13 @@ static void BoxPruningKernelIntrinsics(Container &pairs, FloatOrInt32* BoxBase, 
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
-				ReportIntersections(pairs, RIndex0, Remap + (Box1Ptr - BoxBase), Mask);
+				ReportIntersections(POB, RIndex0, Remap + (Box1Ptr - BoxBase), Mask);
 		}
 		Box0Ptr++;
 	}
 }
 
-static void BoxPruningKernelSSE2(Container &pairs, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
+static void BoxPruningKernelSSE2(PairOutputBuffer &POB, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
 {
 	FloatOrInt32 *RunningPtr = BoxBase;
 	udword BoxToRemap;
@@ -348,7 +395,7 @@ MainLoop:
 			push		eax;			// "remap_base" arg
 			mov			eax, [BoxToRemap];
 			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
+			push		[POB];			// "POB" arg
 			call		ReportIntersections;
 			add			esp, 16;
 
@@ -396,7 +443,7 @@ ProcessTail:
 			push		eax;			// "remap_base" arg
 			mov			eax, [BoxToRemap];
 			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
+			push		[POB];			// "POB" arg
 			call		ReportIntersections;
 			add			esp, 16;
 
@@ -412,7 +459,7 @@ AllDone:
 	}
 }
 
-static void BoxPruningKernelAVX(Container &pairs, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
+static void BoxPruningKernelAVX(PairOutputBuffer &POB, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
 {
 	static const udword PreAlignMasks[16] = {
 		 0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
@@ -490,7 +537,7 @@ AdvanceRunningPtr:
 			push		eax;			// "remap_base" arg
 			mov			eax, [BoxToRemap];
 			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
+			push		[POB];			// "POB" arg
 			call		ReportIntersections;
 			add			esp, 16;
 
@@ -532,7 +579,7 @@ MainLoop:
 			push		eax;			// "remap_base" arg
 			mov			eax, [BoxToRemap];
 			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
+			push		[POB];			// "POB" arg
 			call		ReportIntersections;
 			add			esp, 16;
 
@@ -577,7 +624,7 @@ ProcessTail:
 			push		eax;			// "remap_base" arg
 			mov			eax, [BoxToRemap];
 			push		dword ptr [eax + esi]; // "remap_id0" arg
-			push		[pairs];		// "pairs" arg
+			push		[POB];			// "POB" arg
 			call		ReportIntersections;
 			add			esp, 16;
 
@@ -614,6 +661,9 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	ptrdiff_t BoxBytesP = nbpad*sizeof(FloatOrInt32);
 	ptrdiff_t BoxBytesN = -BoxBytesP;
 	ptrdiff_t BoxBytes3N = 3*BoxBytesN;
+
+	// Our pair output buffer
+	PairOutputBuffer POB;
 
 	// BoxSOA: in order, arrays for MaxX,MinX (int), MaxY,MinY,MaxZ,MinZ (float).
 	FloatOrInt32* BoxSOA = (FloatOrInt32*)_aligned_malloc(BoxBytesP * 6, 32);
@@ -695,19 +745,20 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 
 	// 4) Prune the list
 #if 0
-	BoxPruningKernelIntrinsics(pairs, BoxBase, BoxEnd, Remap, BoxBytesP);
+	BoxPruningKernelIntrinsics(POB, BoxBase, BoxEnd, Remap, BoxBytesP);
 #else
 	int info[4];
 	__cpuid(info, 1);
 
 	// Use AVX if CPU and OS support it
 	if ((info[2] & 0x18000000) == 0x18000000)
-		BoxPruningKernelAVX(pairs, BoxBase, BoxEnd, Remap, BoxBytesP);
+		BoxPruningKernelAVX(POB, BoxBase, BoxEnd, Remap, BoxBytesP);
 	else
-		BoxPruningKernelSSE2(pairs, BoxBase, BoxEnd, Remap, BoxBytesP);
+		BoxPruningKernelSSE2(POB, BoxBase, BoxEnd, Remap, BoxBytesP);
 #endif
 
 	_aligned_free(BoxSOA);
+	pairs.Add(POB.mBegin, POB.GetNbEntries());
 	return true;
 }
 
