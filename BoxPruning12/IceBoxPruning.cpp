@@ -194,7 +194,7 @@ PairOutputBuffer::PairOutputBuffer(Container &host)
 	if (mHost.GetCapacity() < kSlack)
 		mHost.Resize(kSlack);
 
-	mBegin = host.GetEntries() + host.GetNbEntries();
+	mBegin = host.GetEntries();
 	mEnd = mBegin + host.GetNbEntries();
 	mHighWatermark = mBegin + host.GetCapacity() - kSlack;
 }
@@ -207,7 +207,7 @@ PairOutputBuffer::~PairOutputBuffer()
 	mHost.mMaxNbEntries = (mHighWatermark + kSlack) - mBegin;
 }
 
-static __declspec(noinline) void GrowPairOutputBuffer(PairOutputBuffer &buf)
+static void __cdecl GrowPairOutputBuffer(PairOutputBuffer &buf)
 {
 	size_t numEntries = buf.mEnd - buf.mBegin;
 	size_t newCapacity = numEntries * 2 + 2*PairOutputBuffer::kSlack;
@@ -230,7 +230,7 @@ static inline udword Ctz32(udword x)
 }
 
 // Reports a bunch of intersections as specified by a base index and a bit mask.
-static void __cdecl ReportIntersections(PairOutputBuffer& POB, udword remap_id0, const udword* remap_base, udword mask)
+static void __stdcall ReportIntersections(PairOutputBuffer& POB, udword remap_id0, const udword* remap_base, udword mask)
 {
 	// Make sure there's enough space to insert our new elements
 	if (POB.mEnd > POB.mHighWatermark)
@@ -411,7 +411,6 @@ MainLoop:
 			push		dword ptr [eax + esi]; // "remap_id0" arg
 			push		[POB];			// "POB" arg
 			call		ReportIntersections;
-			add			esp, 16;
 
 		pop			edx;
 		pop			ecx;
@@ -459,7 +458,6 @@ ProcessTail:
 			push		dword ptr [eax + esi]; // "remap_id0" arg
 			push		[POB];			// "POB" arg
 			call		ReportIntersections;
-			add			esp, 16;
 
 		pop			edx;
 		pop			ecx;
@@ -553,7 +551,6 @@ AdvanceRunningPtr:
 			push		dword ptr [eax + esi]; // "remap_id0" arg
 			push		[POB];			// "POB" arg
 			call		ReportIntersections;
-			add			esp, 16;
 
 		pop				edx;
 		pop				ecx;
@@ -595,7 +592,6 @@ MainLoop:
 			push		dword ptr [eax + esi]; // "remap_id0" arg
 			push		[POB];			// "POB" arg
 			call		ReportIntersections;
-			add			esp, 16;
 
 		pop				edx;
 		pop				ecx;
@@ -640,7 +636,6 @@ ProcessTail:
 			push		dword ptr [eax + esi]; // "remap_id0" arg
 			push		[POB];			// "POB" arg
 			call		ReportIntersections;
-			add			esp, 16;
 
 		pop				edx;
 		pop				ecx;
