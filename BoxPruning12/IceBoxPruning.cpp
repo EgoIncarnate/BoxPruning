@@ -229,6 +229,17 @@ static inline udword Ctz32(udword x)
 	return idx;
 }
 
+template<typename T>
+static inline T* PtrAddBytes(T* ptr, ptrdiff_t bytes)
+{
+	return (T*)((char*)ptr + bytes);
+}
+
+static void Error()
+{
+	printf("ERROR!\n");
+}
+
 // Reports a bunch of intersections as specified by a base index and a bit mask.
 static void __stdcall ReportIntersections(PairOutputBuffer& POB, udword remap_id0, const udword* remap_base, udword mask)
 {
@@ -248,15 +259,63 @@ static void __stdcall ReportIntersections(PairOutputBuffer& POB, udword remap_id
 	POB.mEnd = Pairs;
 }
 
-static void Error()
+// Reports up to 4 intersections using SSE2 (mask must be <=15!)
+static const __declspec(align(16)) sdword MoveMasksSSE2[16][8] = {
+	{  0, 0, 0, 0, 0, 0, 0, 0 }, // 0
+	{  0, 0, 0, 0, 0, 0, 0, 0 }, // 1
+	{ -1, 0, 0, 0, 0, 0, 0, 0 }, // 2
+	{  0, 0, 0, 0, 0, 0, 0, 0 }, // 3
+	{  0, 0, 0, 0,-1, 0, 0, 0 }, // 4
+	{  0,-1, 0, 0, 0, 0, 0, 0 }, // 5
+	{ -1,-1, 0, 0, 0, 0, 0, 0 }, // 6
+	{  0, 0, 0, 0, 0, 0, 0, 0 }, // 7
+	{  0, 0,-1, 0,-1, 0, 0, 0 }, // 8
+	{  0, 0, 0, 0, 0,-1, 0, 0 }, // 9
+	{ -1, 0, 0, 0, 0,-1, 0, 0 }, // 10
+	{  0, 0,-1, 0, 0, 0, 0, 0 }, // 11
+	{  0, 0, 0, 0,-1,-1, 0, 0 }, // 12
+	{  0,-1,-1, 0, 0, 0, 0, 0 }, // 13
+	{ -1,-1,-1, 0, 0, 0, 0, 0 }, // 14
+	{  0, 0, 0, 0, 0, 0, 0, 0 }, // 15
+};
+static const udword PopCount8[16] = {
+	0, 8, 8,16,  8,16,16,24,  8,16,16,24, 16,24,24,32
+};
+
+// mask ? a : b
+static inline __m128i SelectSSE2(__m128i a, __m128i b, __m128i mask)
 {
-	printf("ERROR!\n");
+	return _mm_or_si128(_mm_and_si128(a, mask), _mm_andnot_si128(mask, b));
 }
 
-template<typename T>
-static inline T* PtrAddBytes(T* ptr, ptrdiff_t bytes)
+static __forceinline void ReportUpTo4Intersections(PairOutputBuffer& POB, udword remap_id0, const udword *remap_base, udword mask)
 {
-	return (T*)((char*)ptr + bytes);
+	// Make sure there's enough space to insert our new elements
+	if (POB.mEnd > POB.mHighWatermark)
+		GrowPairOutputBuffer(POB);
+
+	__m128i VecRemappedId0 = _mm_set1_epi32(remap_id0);
+
+	// Grab 4 remapped Id1s. Now we need to compact this vector so it only contains
+	// the elements we want to store (pack towards lane 0)
+	__m128i VecRemappedId1 = _mm_loadu_si128((const __m128i *)remap_base);
+
+	// Perform the output shuffle. NOTE: With SSSE3 or higher, can do this
+	// all with a single PSHUFB.
+	__m128i MoveMask1 = _mm_load_si128((const __m128i *)&MoveMasksSSE2[mask][0]);
+	__m128i MoveMask2 = _mm_load_si128((const __m128i *)&MoveMasksSSE2[mask][4]);
+
+	// Move all elements that need to move by 1 or 3 lanes
+	VecRemappedId1 = SelectSSE2(_mm_shuffle_epi32(VecRemappedId1, 0xf9), VecRemappedId1, MoveMask1);
+	// Move all elements that need to move by 2 or 3 lanes
+	VecRemappedId1 = SelectSSE2(_mm_shuffle_epi32(VecRemappedId1, 0xfe), VecRemappedId1, MoveMask2);
+
+	// Interleave the compacted vector with VecRemappedId0 and store
+	udword *Pairs = POB.mEnd;
+	_mm_storeu_si128((__m128i *) (Pairs + 0), _mm_unpacklo_epi32(VecRemappedId0, VecRemappedId1));
+	_mm_storeu_si128((__m128i *) (Pairs + 4), _mm_unpackhi_epi32(VecRemappedId0, VecRemappedId1));
+
+	POB.mEnd = PtrAddBytes(Pairs, PopCount8[mask]);
 }
 
 static void BoxPruningKernelIntrinsics(PairOutputBuffer &POB, FloatOrInt32* BoxBase, FloatOrInt32* BoxEnd, udword* Remap, ptrdiff_t BoxBytesP)
@@ -273,7 +332,6 @@ static void BoxPruningKernelIntrinsics(PairOutputBuffer &POB, FloatOrInt32* BoxB
 
 		const FloatOrInt32 *MaxLimitPtr = PtrAddBytes(PtrAddBytes(Box0Ptr, 2*BoxBytesN), BoxBytesN);
 		const sdword MaxLimit = MaxLimitPtr->s;
-		udword RIndex0 = Remap[Box0Ptr - BoxBase];
 
 		__m128i MaxLimitVec = _mm_set1_epi32(MaxLimitPtr->s);
 		__m128 Box0MaxY = _mm_set1_ps(PtrAddBytes(Box0Ptr, 1*BoxBytesN)->f);
@@ -302,7 +360,7 @@ static void BoxPruningKernelIntrinsics(PairOutputBuffer &POB, FloatOrInt32* BoxB
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
-				ReportIntersections(POB, RIndex0, Remap + ((Box1Ptr - 4) - BoxBase), Mask);
+				ReportUpTo4Intersections(POB, Remap[Box0Ptr - BoxBase], Remap + ((Box1Ptr - 4) - BoxBase), Mask);
 		}
 
 		// Tail group: first box is in, but one or more boxes with mMinX past MaxLimit inside.
@@ -327,7 +385,7 @@ static void BoxPruningKernelIntrinsics(PairOutputBuffer &POB, FloatOrInt32* BoxB
 
 			int Mask = _mm_movemask_ps(Cmp);
 			if (Mask)
-				ReportIntersections(POB, RIndex0, Remap + (Box1Ptr - BoxBase), Mask);
+				ReportUpTo4Intersections(POB, Remap[Box0Ptr - BoxBase], Remap + (Box1Ptr - BoxBase), Mask);
 		}
 		Box0Ptr++;
 	}
@@ -339,27 +397,6 @@ static void BoxPruningKernelSSE2(PairOutputBuffer &POB, FloatOrInt32* BoxBase, F
 	udword BoxToRemap;
 	static const udword PreAlignMasks[8] = {
 		 0u,  0u,  0u,  0u, ~0u, ~0u, ~0u, ~0u,
-	};
-	static const __declspec(align(16)) sdword MoveMasks[16][8] = {
-		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 0
-		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 1
-		{ -1, 0, 0, 0, 0, 0, 0, 0 }, // 2
-		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 3
-		{  0, 0, 0, 0,-1, 0, 0, 0 }, // 4
-		{  0,-1, 0, 0, 0, 0, 0, 0 }, // 5
-		{ -1,-1, 0, 0, 0, 0, 0, 0 }, // 6
-		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 7
-		{  0, 0,-1, 0,-1, 0, 0, 0 }, // 8
-		{  0, 0, 0, 0, 0,-1, 0, 0 }, // 9
-		{ -1, 0, 0, 0, 0,-1, 0, 0 }, // 10
-		{  0, 0,-1, 0, 0, 0, 0, 0 }, // 11
-		{  0, 0, 0, 0,-1,-1, 0, 0 }, // 12
-		{  0,-1,-1, 0, 0, 0, 0, 0 }, // 13
-		{ -1,-1,-1, 0, 0, 0, 0, 0 }, // 14
-		{  0, 0, 0, 0, 0, 0, 0, 0 }, // 15
-	};
-	static const udword PopCount8[16] = {
-		0, 8, 8,16,  8,16,16,24,  8,16,16,24, 16,24,24,32
 	};
 
 	__asm
@@ -489,12 +526,12 @@ NoGrowNecessary:
 			mov			ecx, PopCount8[eax*4];
 			shl			eax, 5;					// mask -> table offset
 			pshufd		xmm2, xmm1, 0f9h;		// move everything by 1 lane
-			movdqa		xmm3, MoveMasks[eax];
+			movdqa		xmm3, MoveMasksSSE2[eax];
 			pand		xmm2, xmm3;				// and select via mask
 			pandn		xmm3, xmm1;
 			por			xmm2, xmm3;
 			pshufd		xmm1, xmm2, 0feh;		// move everything by 2 lanes
-			movdqa		xmm3, MoveMasks[eax + 16];
+			movdqa		xmm3, MoveMasksSSE2[eax + 16];
 			pand		xmm1, xmm3;				// and select via mask
 			pandn		xmm3, xmm2;
 			por			xmm1, xmm3;
