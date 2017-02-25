@@ -477,7 +477,7 @@ MainLoop:
 
 		movaps		xmm1, [edi];
 		cmpleps		xmm1, xmm4;			// Box1MinY <= Box0MaxY?
-		pand		xmm0, xmm1;			// The math says this loop needs *exactly* one andps replaced by pand. The math is right. :)
+		andps		xmm0, xmm1;
 
 		movaps		xmm1, [edi + ecx];
 		cmpnltps	xmm1, xmm7;			// Box1MaxZ >= Box0MinZ?
@@ -929,7 +929,7 @@ bool Meshmerizer::CompleteBoxPruning(udword nb, const AABB* list, Container& pai
 	__cpuid(info, 1);
 
 	// Use AVX if CPU and OS support it
-	if ((info[2] & 0x18000000) == 0x18000000)
+	if (0 && (info[2] & 0x18000000) == 0x18000000)
 		BoxPruningKernelAVX(POB, BoxBase, BoxEnd, Remap, BoxBytesP);
 	else
 		BoxPruningKernelSSE2(POB, BoxBase, BoxEnd, Remap, BoxBytesP);

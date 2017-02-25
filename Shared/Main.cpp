@@ -532,7 +532,7 @@ static void RunValidityTest()
 
 int main(int argc, char* argv[])
 {
-	bool ProfilingMode = false;
+	bool ProfilingMode = true;
 
 	RunPerformanceTest(ProfilingMode);
 	if (!ProfilingMode)

@@ -74,5 +74,8 @@
   </ItemGroup>
   <ItemGroup>
     <Text Include="ReadMe.txt" />
+    <Text Include="Notes.txt">
+      <Filter>App</Filter>
+    </Text>
   </ItemGroup>
 </Project>
