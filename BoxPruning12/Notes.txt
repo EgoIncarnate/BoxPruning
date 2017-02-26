@@ -261,20 +261,3 @@ C++ intrinsics version as well. (The alignment trick does not help
 in the intrinsics ver, since the compiler is not as good about
 managing registers and starts tripping all over its feet when you
 do it.)
-
-And just one more thing...
---------------------------
-
-And finally, my favorite change of the lot: it's commit f6f913d0.
-
-Yup. One-line change. Replacing one ANDPS by PAND. In floating-point
-code. Why? If you look at notes_avx.txt, you'll note that we have
-5 p5 ops, 4 p1 ops, and 3 ops that are either port 0 or can go to
-either of ports 0, 1 and 5 but will probably go to port 0 because
-that has the lowest load.
-
-Wouldn't it be great if we could replace one port 5 op with a port 0
-op, and have perfectly balanced 4 ops going to each? Well, that's
-exactly what changing that ANDPS to PAND does. And making that
-change allows us to sustain an even 4 cycles per iteration of the
-main loop.
